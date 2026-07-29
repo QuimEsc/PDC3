@@ -83,6 +83,19 @@
           }
         }
       },
+      "participationRewards": {
+        "$group": {
+          "$student": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))",
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+            ".validate": "!newData.exists() || newData.hasChildren(['eventId','participationCount','badgeId','updatedAt'])",
+            "eventId": { ".validate": "newData.isString() && newData.val().length <= 100" },
+            "participationCount": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+            "badgeId": { ".validate": "newData.isString() && newData.val().length <= 60" },
+            "$other": { ".validate": true }
+          }
+        }
+      },
       "unitAccess": {
         "$group": {
           ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId))",
