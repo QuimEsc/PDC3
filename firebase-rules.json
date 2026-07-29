@@ -119,7 +119,7 @@
       },
       "classState": {
         "$group": {
-          ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+          ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || auth.token.role === 'student')"
         }
       },
       "sessionRequests": {
