@@ -1,21 +1,44 @@
 <!doctype html>
-<html lang="ca-valencia">
+<html lang="ca">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Àmbit científic de 3r ESO PDC · Comunitat Valenciana" />
+    <meta
+      name="description"
+      content="Àmbit científic de 3r ESO PDC · Comunitat Valenciana"
+    />
     <meta property="og:title" content="Laboratori PDC" />
-    <meta property="og:description" content="Entendre, provar i decidir amb ciència." />
-    <meta property="og:image" content="./og-laboratori-pdc.png" />
+    <meta
+      property="og:description"
+      content="Entendre, provar i decidir amb ciència."
+    />
+    <meta property="og:image" content="./og-laboratori-pdc-arena.png" />
     <link rel="icon" href="./favicon.svg" />
     <title>Laboratori PDC</title>
 
     <script src="./config.js"></script>
     <script src="./firebase-config.js"></script>
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [["\\(", "\\)"], ["$", "$"]],
+          displayMath: [["\\[", "\\]"], ["$$", "$$"]],
+          processEscapes: true,
+        },
+        options: {
+          skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+        },
+        chtml: { scale: 1.06 },
+      };
+    </script>
     <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
-    <script type="module" crossorigin src="./assets/index-DRzgaYsP.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-D70u4UwJ.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script defer src="./math-render.js"></script>
+    <script type="module" crossorigin src="./assets/index-BmdSZzF1.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/preload-helper-Bj9ztJoN.js">
+    <link rel="stylesheet" crossorigin href="./assets/index-CNqkS54Y.css">
   </head>
   <body>
     <div id="root"></div>
