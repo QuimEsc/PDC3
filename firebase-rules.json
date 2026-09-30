@@ -3,6 +3,38 @@
     ".read": false,
     ".write": false,
     "GamificacioPDC": {
+      "academic": {
+        "$group": {
+          "events": {
+            "$student": {
+              ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))",
+              ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId",
+              "$eventId": {
+                ".validate": "!newData.exists() || (newData.hasChildren(['eventId','studentId','sessionId','type','unitId','activityId','status','createdAt','sequence']) && newData.child('studentId').val() === auth.token.studentId)"
+              }
+            }
+          },
+          "pendingEvents": {
+            "$eventId": {
+              ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+              ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(newData.child('studentId').val()).child('sessionId').val() === auth.token.sessionId",
+              ".validate": "!data.exists() && newData.exists() && newData.hasChildren(['eventId','studentId','sessionId','type','status']) && newData.child('studentId').val() === auth.token.studentId"
+            }
+          },
+          "backendGrades": {
+            ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+            ".write": false
+          },
+          "unitClosures": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || auth.token.role === 'student')",
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+          },
+          "termClosures": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || auth.token.role === 'student')",
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+          }
+        }
+      },
       "publicRoster": {
         "$group": {
           ".read": true,
@@ -147,3 +179,5 @@
     }
   }
 }
+
+
