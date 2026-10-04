@@ -1,0 +1,1 @@
+import{n as e}from"./firebase-academic-service-B35ing0K.js";export{e as getAcademicQueue};
