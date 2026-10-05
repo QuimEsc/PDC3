@@ -10,7 +10,7 @@
               ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))",
               "$eventId": {
                 ".validate": "newData.hasChildren(['eventId','submissionId','studentId','sessionId','type','unitId','activityId','payload','status','createdAt','sequence']) && newData.child('eventId').val() === $eventId && newData.child('studentId').val() === auth.token.studentId && newData.child('sessionId').val() === auth.token.sessionId",
-                ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId && !data.exists() && newData.exists() && (!newData.child('activityId').val().matches(/^u[0-9]{2}-0[5-9]$/) || (newData.child('status').val() === 'PROCESSING' && $eventId === newData.child('submissionId').val() + '-answer' && !newData.child('payload').child('grade').exists() && !newData.child('payload').child('progress').exists()))"
+                ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId && !data.exists() && newData.exists()"
               }
             },
             ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
@@ -18,7 +18,7 @@
           "pendingEvents": {
             "$eventId": {
               ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId)) && (auth.token.role === 'teacher' || data.child('studentId').val() === auth.token.studentId)",
-              ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId && !data.exists() && newData.exists() && !newData.child('activityId').val().matches(/^u[0-9]{2}-0[5-9]$/)",
+              ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId && !data.exists() && newData.exists()",
               ".validate": "newData.hasChildren(['eventId','submissionId','studentId','sessionId','type','unitId','activityId','payload','status','createdAt','sequence']) && newData.child('eventId').val() === $eventId && newData.child('studentId').val() === auth.token.studentId && newData.child('sessionId').val() === auth.token.sessionId"
             }
           },
