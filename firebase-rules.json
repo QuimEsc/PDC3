@@ -280,6 +280,12 @@
           }
         }
       },
+      "rubrics": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+        }
+      },
       "assessmentConfig": {
         "$group": {
           ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId))",
