@@ -283,7 +283,12 @@
       "rubrics": {
         "$group": {
           ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
-          ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+          ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          "ratings": {
+            "$assessmentId": {
+              ".validate": "!root.child('GamificacioPDC').child('rubrics').child($group).child('deletedAssessments').child($assessmentId).exists()"
+            }
+          }
         }
       },
       "assessmentConfig": {
