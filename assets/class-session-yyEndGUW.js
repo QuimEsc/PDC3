@@ -1,0 +1,1 @@
+var e=10800*1e3;function t(e,t=Date.now()){return e?.active===!0&&Number(e.startedAt)>0&&t>=Number(e.startedAt)&&t-Number(e.startedAt)<108e5}function n(e,n=Date.now()){return{...e||{},active:t(e,n)}}export{n,t as r,e as t};
