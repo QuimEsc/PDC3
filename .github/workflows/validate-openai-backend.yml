@@ -7,6 +7,10 @@ on:
       - 'APPSCRIPT/**'
       - 'scripts/verify-openai.mjs'
       - 'tests/open*.test.mjs'
+      - 'docs/OPENAI*'
+      - 'docs/openai-candidate-manifest.json'
+      - 'HANDOFF.md'
+      - 'PDC3_HANDOFF.md'
       - '.github/workflows/validate-openai-backend.yml'
   workflow_dispatch:
 

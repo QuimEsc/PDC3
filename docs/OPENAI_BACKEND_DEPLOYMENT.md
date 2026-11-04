@@ -29,6 +29,8 @@ These 33 standalone tests need Node 22+, no package installation, no credentials
 
 The fix accepts the exact unchanged synthetic ANSWER that production rejected. This is a local proof of the cause and repair, not a claim that production is already fixed. No new diagnostic OpenAI calls were needed in this investigation.
 
+Read-only impact check at the start: 45 ungraded ANSWER, including the 26 older cases and 19 new records whose original activity hash/content match but whose stored-key hash differs. None was graded or rewritten. Integrity after the synthetic smoke: 577/577 original events unchanged, backendGrades and teacherState unchanged, queues 0/0/0. The one added synthetic ANSWER remains pending until authorized publication. The final full-source suite has 304 PASS / 0 FAIL / 1 emulator SKIP (305 total); TSC, lint and both builds PASS. Candidate GitHub Actions run `41861734915` succeeded with all 33 standalone tests.
+
 ## Deployment — requires express authorization
 
 1. Keep Pages, Firebase Rules, evaluation configuration and model unchanged. This is a backend-only candidate; merging files into GitHub does not update Apps Script.
