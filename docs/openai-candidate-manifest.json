@@ -6,5 +6,8 @@
   "frontendChanges": false,
   "modelChanges": false,
   "configurationTemplatesOnly": true,
-  "deploymentAuthorized": false
+  "deploymentAuthorized": true,
+  "publishedAppsScriptVersion": 28,
+  "deployedAtUtc": "2026-11-04T16:27:33.127343+00:00",
+  "pagesDeploymentUnchanged": true
 }

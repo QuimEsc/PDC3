@@ -1,5 +1,17 @@
 # Backend candidate — 04-11-2026
 
+## Authorized deployment completed
+
+**Apps Script v28 deployed and verified on 04-11-2026 at 16:27 UTC / 17:27 Europe/Madrid.** The user explicitly authorized backend-only publication after final CI success. The published Code hash matches the manifest. The project, deployment, endpoint, access, private Configuracio and appsscript manifest are unchanged. Pages remains e23c7b9; no merge or frontend/Rules deployment was performed. Rollback v27 is retained and was not needed.
+
+The exact previously stored synthetic ANSWER was resumed from the real production browser: one GRADE, one attempt, 10/10, feedback and next-activity navigation. The original ANSWER is byte-equivalent as structured data, with its original identity and date. Reload/re-entry recovered the same answer, score and feedback. Backend telemetry records Luna medium, 5,099 ms, 1,418 input / 283 output tokens. No diagnostic API calls were repeated.
+
+The worker projected the grade to Sheets: Progres and one Respostes history row match the original submission, answer, feedback, score and attempt. The teacher UI displays the same values. GRADE is SYNCED; queues are 0/0/0. One existing time-based pdcForceAcademicSync trigger was observed, with recent completed post-deployment executions. No trigger was changed.
+
+Final integrity: 578/578 pre-existing events unchanged; all prior backendGrades, real-student events/teacher updates, commands and evaluation/pedagogical settings preserved. Only the expected synthetic GRADE and its normal projection/rewards were added. The 26 historical plus 19 newer previously pending ANSWER were not regraded.
+
+There was no eligible synthetic pedagogical review: the result is correct without a review flag. Review-screen reading was verified, but no teacher-review write was executed or fabricated. Credential rotation remains separately authorized. The sections below retain the original baseline and rollout procedure for traceability; they do not indicate a pending deployment.
+
 ## Production baseline
 
 - Pages publishes the root of `main`, commit `e23c7b9a11e6ea5b2b96b09565b2f8957dafa311`; its latest Pages run succeeded.
@@ -47,4 +59,4 @@ The live key was found in unrelated local Git history and removed from its worki
 
 ## Remaining access limitation
 
-Apps Script execution history currently requires Google identity verification in the browser; the available OAuth token returned 403 for the processes listing. This is separate from API access to deployment content and from the context-validation failure reproduced above. No permission expansion or workaround was attempted.
+Initially, Apps Script execution history required Google identity verification and the OAuth processes listing returned 403. The user subsequently completed the normal browser login; recent worker executions and the single trigger were read successfully. No permission expansion or workaround was attempted. The failed API processes listing is not used as execution evidence.
