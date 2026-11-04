@@ -1,0 +1,5 @@
+.env*
+secrets/
+.secrets/
+apps-script/Configuracio.local.gs
+APPSCRIPT/Configuracio.local.gs
