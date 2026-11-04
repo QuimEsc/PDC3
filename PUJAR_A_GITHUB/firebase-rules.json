@@ -1,0 +1,333 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "GamificacioPDC": {
+      "academic": {
+        "$group": {
+          "events": {
+            "$student": {
+              ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))",
+              "$eventId": {
+                ".validate": "newData.hasChildren(['eventId','submissionId','studentId','sessionId','type','unitId','activityId','payload','status','createdAt','sequence']) && newData.child('eventId').val() === $eventId && newData.child('studentId').val() === auth.token.studentId && newData.child('sessionId').val() === auth.token.sessionId",
+                ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId && !data.exists() && newData.exists() && (!newData.child('activityId').val().matches(/^u[0-9]{2}-0[5-9]$/) || (newData.child('status').val() === 'PROCESSING' && $eventId === newData.child('submissionId').val() + '-answer' && !newData.child('payload').child('grade').exists() && !newData.child('payload').child('progress').exists())) && (root.child('GamificacioPDC').child('academic').child($group).child('events').child($student).child(newData.child('submissionId').val() + '-answer').child('payload').child('submissionMode').val() !== 'EXPLICIT_NO_ANSWER' || ($eventId === newData.child('submissionId').val() + '-answer' && !newData.child('payload').child('grade').exists() && !newData.child('payload').child('progress').exists())) && (newData.child('payload').child('submissionMode').val() !== 'EXPLICIT_NO_ANSWER' || ($eventId === newData.child('submissionId').val() + '-answer' && newData.child('payload').child('answer').val() === '' && newData.child('payload').child('explicitConfirmation').val() === true && newData.child('status').val() === 'PROCESSING' && !newData.child('payload').child('grade').exists() && !newData.child('payload').child('progress').exists()))"
+              }
+            },
+            ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+          },
+          "pendingEvents": {
+            "$eventId": {
+              ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId)) && (auth.token.role === 'teacher' || data.child('studentId').val() === auth.token.studentId)",
+              ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId && !data.exists() && newData.exists() && !newData.child('activityId').val().matches(/^u[0-9]{2}-0[5-9]$/) && newData.child('payload').child('submissionMode').val() !== 'EXPLICIT_NO_ANSWER' && root.child('GamificacioPDC').child('academic').child($group).child('events').child(auth.token.studentKey).child(newData.child('submissionId').val() + '-answer').child('payload').child('submissionMode').val() !== 'EXPLICIT_NO_ANSWER'",
+              ".validate": "newData.hasChildren(['eventId','submissionId','studentId','sessionId','type','unitId','activityId','payload','status','createdAt','sequence']) && newData.child('eventId').val() === $eventId && newData.child('studentId').val() === auth.token.studentId && newData.child('sessionId').val() === auth.token.sessionId"
+            }
+          },
+          "backendGrades": {
+            ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+            ".write": false
+          },
+          "unitClosures": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || auth.token.role === 'student')",
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+          },
+          "termClosures": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || auth.token.role === 'student')",
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+          },
+          "pendingAnswerManagement": {
+            ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+            ".write": false
+          }
+        }
+      },
+      "publicRoster": {
+        "$group": {
+          ".read": true,
+          ".write": false,
+          "students": {
+            "$index": {
+              ".validate": "newData.hasChildren(['id','name'])",
+              "id": {
+                ".validate": "newData.isString() && newData.val().length <= 100"
+              },
+              "name": {
+                ".validate": "newData.isString() && newData.val().length <= 100"
+              },
+              "$other": {
+                ".validate": false
+              }
+            }
+          },
+          "$other": {
+            ".validate": true
+          }
+        }
+      },
+      "live": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          ".indexOn": [
+            "updatedAt",
+            "studentName",
+            "state"
+          ],
+          "$student": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))",
+            ".write": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))",
+            ".validate": "!newData.exists() || (newData.hasChildren(['studentId','studentName','ownerSessionId','sessionId','updatedAt']) && (auth.token.role === 'teacher' || (newData.child('studentId').val() === auth.token.studentId && newData.child('ownerSessionId').val() === auth.token.sessionId && newData.child('sessionId').val() === auth.token.sessionId)))",
+            "studentId": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "studentName": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "ownerSessionId": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "sessionId": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "answer": {
+              ".validate": "newData.isString() && newData.val().length <= 12000"
+            },
+            "feedback": {
+              ".validate": "newData.isString() && newData.val().length <= 12000"
+            },
+            "$other": {
+              ".validate": true
+            }
+          }
+        }
+      },
+      "presence": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          ".indexOn": [
+            "updatedAt",
+            "studentName",
+            "state"
+          ],
+          "$student": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))",
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId",
+            ".validate": "!newData.exists() || (newData.hasChildren(['studentId','studentName','sessionId','state','updatedAt']) && newData.child('studentId').val() === auth.token.studentId && newData.child('sessionId').val() === auth.token.sessionId)",
+            "studentId": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "studentName": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "sessionId": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "state": {
+              ".validate": "newData.isString() && newData.val().length <= 20"
+            },
+            "$other": {
+              ".validate": true
+            }
+          }
+        }
+      },
+      "comments": {
+        "$group": {
+          "$student": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))",
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+            ".validate": "!newData.exists() || newData.hasChildren(['text','updatedAt'])",
+            "text": {
+              ".validate": "newData.isString() && newData.val().length <= 600"
+            },
+            "$other": {
+              ".validate": true
+            }
+          }
+        }
+      },
+      "activityUnlocks": {
+        "$group": {
+          "$student": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))",
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+            ".validate": "!newData.exists() || newData.hasChildren(['eventId','activityId','reason','variant','unlockedAt'])",
+            "$other": {
+              ".validate": true
+            }
+          }
+        }
+      },
+      "correctionApprovals": {
+        "$group": {
+          "$student": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))",
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+            ".validate": "!newData.exists() || newData.hasChildren(['eventId','activityId','approvedAt'])",
+            "$other": {
+              ".validate": true
+            }
+          }
+        }
+      },
+      "participationRewards": {
+        "$group": {
+          "$student": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))",
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+            ".validate": "!newData.exists() || newData.hasChildren(['eventId','participationCount','badgeId','updatedAt'])",
+            "eventId": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "participationCount": {
+              ".validate": "newData.isNumber() && newData.val() >= 0"
+            },
+            "badgeId": {
+              ".validate": "newData.isString() && newData.val().length <= 60"
+            },
+            "$other": {
+              ".validate": true
+            }
+          }
+        }
+      },
+      "unitAccess": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId))",
+          ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          ".validate": "!newData.exists() || newData.hasChildren(['items','updatedAt'])"
+        }
+      },
+      "battles": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId))",
+          "current": {
+            ".write": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId && data.child('participants').child(auth.token.studentKey).exists()))",
+            "players": {
+              "$player": {
+                ".validate": "auth.token.role === 'teacher' || !data.child('pendingChest').exists() || newData.child('pendingChest').exists()",
+                "pendingChest": {
+                  ".validate": "auth.token.role === 'teacher' || (newData.hasChildren(['effect','claimIndex','obtainedAt','durationMs','state']) && newData.child('durationMs').val() === 10000 && ((newData.child('claimIndex').val() !== data.child('claimIndex').val() && newData.child('claimIndex').val() === data.parent().child('questionIndex').val() + 1 && newData.parent().child('questionIndex').val() === newData.child('claimIndex').val() && newData.child('obtainedAt').val() === now && newData.child('state').val() === 'PENDING') || (data.exists() && newData.child('claimIndex').val() === data.child('claimIndex').val() && newData.child('obtainedAt').val() === data.child('obtainedAt').val() && newData.child('durationMs').val() === data.child('durationMs').val() && newData.child('effect').val() === data.child('effect').val() && (newData.child('state').val() === data.child('state').val() || (data.child('state').val() === 'PENDING' && ((newData.child('state').val() === 'USED' && newData.parent().parent().parent().child('phase').val() === 'RUNNING' && now < newData.parent().parent().parent().child('meta/endAt').val() && (!(data.child('effect').val() === 'FURTAR_10' || data.child('effect').val() === 'FURTAR_25' || data.child('effect').val() === 'INTERCANVIAR') || ! (now >= data.child('obtainedAt').val() + 10000))) || (newData.child('state').val() === 'EXPIRED' && (now >= data.child('obtainedAt').val() + 10000 || now >= newData.parent().parent().parent().child('meta/endAt').val() || newData.parent().parent().parent().child('phase').val() !== 'RUNNING'))))))))"
+                },
+                "gold": {
+                  ".validate": "auth.token.role === 'teacher' || !data.exists() || newData.val() === data.val() || (newData.parent().parent().parent().child('phase').val() === 'RUNNING' && now < newData.parent().parent().parent().child('meta/endAt').val() && ((data.parent().parent().child(auth.token.studentKey).child('pendingChest').exists() && !(data.parent().parent().child(auth.token.studentKey).child('pendingChest').child('effect').val() === 'FURTAR_10' || data.parent().parent().child(auth.token.studentKey).child('pendingChest').child('effect').val() === 'FURTAR_25' || data.parent().parent().child(auth.token.studentKey).child('pendingChest').child('effect').val() === 'INTERCANVIAR') && data.parent().parent().child(auth.token.studentKey).child('pendingChest/state').val() === 'PENDING' && newData.parent().parent().child(auth.token.studentKey).child('pendingChest/state').val() === 'USED' && newData.parent().parent().child(auth.token.studentKey).child('chestClaimIndex').val() === data.parent().parent().child(auth.token.studentKey).child('pendingChest/claimIndex').val()) || (data.parent().parent().child(auth.token.studentKey).child('pendingChest').child('state').val() === 'PENDING' && now < data.parent().parent().child(auth.token.studentKey).child('pendingChest').child('obtainedAt').val() + 10000 && newData.parent().parent().child(auth.token.studentKey).child('pendingChest').child('state').val() === 'USED' && newData.parent().parent().child(auth.token.studentKey).child('chestClaimIndex').val() === data.parent().parent().child(auth.token.studentKey).child('pendingChest').child('claimIndex').val()) || (data.parent().parent().parent().child('duels').child(data.parent().parent().child(auth.token.studentKey).child('activeDuelId').val()).child('state').val() === 'ACTIVE' && newData.parent().parent().parent().child('duels').child(data.parent().parent().child(auth.token.studentKey).child('activeDuelId').val()).child('state').val() === 'RESOLVED' && now < data.parent().parent().parent().child('duels').child(data.parent().parent().child(auth.token.studentKey).child('activeDuelId').val()).child('endAt').val())))"
+                }
+              }
+            },
+            "duels": {
+              "$duel": {
+                ".validate": "auth.token.role === 'teacher' || (newData.hasChildren(['duelId','challengerId','targetId','startAt','endAt','state']) && ((!data.exists() && newData.child('challengerId').val() === auth.token.studentId && newData.child('startAt').val() >= now && newData.child('startAt').val() <= now + 2000 && newData.child('endAt').val() <= newData.child('startAt').val() + 30000 && newData.child('endAt').val() <= newData.parent().parent().child('meta/endAt').val() && newData.child('state').val() === 'ACTIVE') || (data.exists() && newData.child('duelId').val() === data.child('duelId').val() && newData.child('challengerId').val() === data.child('challengerId').val() && newData.child('targetId').val() === data.child('targetId').val() && newData.child('startAt').val() === data.child('startAt').val() && newData.child('endAt').val() === data.child('endAt').val() && (data.child('state').val() === 'ACTIVE' || newData.child('state').val() === data.child('state').val()))))",
+                "answers": {
+                  "$student": {
+                    ".validate": "auth.token.role === 'teacher' || (data.exists() && newData.child('correct').val() === data.child('correct').val() && newData.child('answeredAt').val() === data.child('answeredAt').val()) || (!data.exists() && $student === auth.token.studentKey && newData.hasChildren(['correct','answeredAt']) && now >= newData.parent().parent().child('startAt').val() && now < newData.parent().parent().child('endAt').val() && now < newData.parent().parent().parent().parent().child('meta/endAt').val() && newData.parent().parent().parent().parent().child('phase').val() === 'RUNNING')"
+                  }
+                }
+              }
+            },
+            "meta": {
+              ".validate": "auth.token.role === 'teacher' || (newData.child('battleId').val() === data.child('battleId').val() && newData.child('startAt').val() === data.child('startAt').val() && newData.child('endAt').val() === data.child('endAt').val() && newData.child('createdAt').val() === data.child('createdAt').val())"
+            },
+            "phase": {
+              ".validate": "auth.token.role === 'teacher' || newData.val() === data.val() || (data.val() === 'COUNTDOWN' && newData.val() === 'RUNNING' && now >= newData.parent().child('meta/startAt').val())"
+            }
+          },
+          "history": {
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+          },
+          "pendingFinalizations": {
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+          }
+        }
+      },
+      "activeSessions": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          "$student": {
+            ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && auth.token.studentKey === $student && data.child('sessionId').val() === auth.token.sessionId"
+          }
+        }
+      },
+      "classState": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || auth.token.role === 'student')"
+        }
+      },
+      "sessionRequests": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+        }
+      },
+      "progressEvents": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          "$student": {
+            ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId",
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId",
+            ".validate": "!newData.exists() || (newData.hasChildren(['eventId','studentId','studentName','activityId','unitId','score','status','updatedAt']) && newData.child('studentId').val() === auth.token.studentId)",
+            "eventId": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "studentId": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "studentName": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "activityId": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "unitId": {
+              ".validate": "newData.isString() && newData.val().length <= 100"
+            },
+            "status": {
+              ".validate": "newData.isString() && newData.val().length <= 40"
+            },
+            "$other": {
+              ".validate": true
+            }
+          }
+        }
+      },
+      "teacherState": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          "settings": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId))"
+          },
+          "assessmentPlan": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId))"
+          },
+          "unitAccess": {
+            ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId))"
+          },
+          "studentUpdates": {
+            "$student": {
+              ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))"
+            }
+          },
+          "profiles": {
+            "$student": {
+              ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && auth.token.studentKey === $student && root.child('GamificacioPDC').child('activeSessions').child($group).child($student).child('sessionId').val() === auth.token.sessionId))"
+            }
+          }
+        }
+      },
+      "rubrics": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          "ratings": {
+            "$assessmentId": {
+              ".validate": "!root.child('GamificacioPDC').child('rubrics').child($group).child('deletedAssessments').child($assessmentId).exists()"
+            }
+          }
+        }
+      },
+      "assessmentConfig": {
+        "$group": {
+          ".read": "auth != null && auth.token.groupId === $group && (auth.token.role === 'teacher' || (auth.token.role === 'student' && root.child('GamificacioPDC').child('activeSessions').child($group).child(auth.token.studentKey).child('sessionId').val() === auth.token.sessionId))",
+          ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'"
+        }
+      }
+    }
+  }
+}

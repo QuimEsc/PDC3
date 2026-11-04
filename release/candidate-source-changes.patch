@@ -1,0 +1,684 @@
+diff --git a/app/PdcApp.tsx b/app/PdcApp.tsx
+index 111bc78..822a4f3 100644
+--- a/app/PdcApp.tsx
++++ b/app/PdcApp.tsx
+@@ -6,6 +6,8 @@ import { getAcademicQueue, subscribeAcademicProgress, disposeAcademicQueues, rea
+ import { confirmAcademicEvent } from "../lib/academic-confirmation";
+ import { hasConfirmedGrade, requireConfirmedGrade } from "../lib/grade-contract";
+ import { preserveAttemptSettings } from "../lib/academic-progress";
++import { ExplicitBlankConfirmation } from "./components/ExplicitBlankConfirmation";
++import { PendingQualificationPanel } from "./components/PendingQualificationPanel";
+ import { buildAnswerRecoveryContext, pendingAnswers, type PendingAnswer } from "../lib/answer-recovery";
+ import { isClassProtectionActive } from "../lib/class-session";
+ import { reconcileTechnicalIncidents, type ReconciledIncident } from "../lib/technical-incidents";
+@@ -661,6 +663,9 @@ function ActivityViewer({
+   const correctionDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+   const focusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
++  const [blankConfirmation, setBlankConfirmation] = useState(false);
++  const [blankPending, setBlankPending] = useState(false);
++  const pendingBlank = useRef(false);
+   const submitInFlight = useRef(false);
+   const correctionInFlight = useRef(false);
+   const pendingGradeSubmission = useRef<PendingSubmission | null>(null);
+@@ -706,6 +711,7 @@ function ActivityViewer({
+     setDraftReady(preview || readOnly);
+     setCorrectionDraftReady(preview || !correctionRequired || correctionCompleted);
+     setDraftRestored(false);
++    pendingBlank.current = false; setBlankPending(false); setBlankConfirmation(false);
+     const previousAnswer = Number(progress?.gradedAttempts || 0) > 0 ? progress?.answer || "" : "";
+     const restored = readOnly || previousAnswer ? restoredAnswer(activity, progress?.answer || "") : {
+       ...restoredAnswer(activity, ""),
+@@ -753,10 +759,12 @@ function ActivityViewer({
+         ]).then(([draft, pending]) => {
+             if (cancelled) return;
+             if (pending) {
++              pendingBlank.current = pending.payload.submissionMode === "EXPLICIT_NO_ANSWER" && pending.payload.explicitConfirmation === true;
++              setBlankPending(pendingBlank.current);
+               const text = String(pending.payload.answer);
+               const recoveredSubmission: PendingSubmission = {
+                 submissionId: pending.submissionId, activityId: activity.id, phase: "GRADE", variant,
+-                attemptsBefore: Number(progress?.gradedAttempts || 0), answerFingerprint: answerFingerprint(text), createdAt: pending.createdAt,
++                attemptsBefore: Number(progress?.gradedAttempts || 0), answerFingerprint: answerFingerprint(pendingBlank.current ? "[EXPLICIT_NO_ANSWER]" : text), createdAt: pending.createdAt,
+               };
+               pendingGradeSubmission.current = recoveredSubmission;
+               writePendingSubmission(gradeSubmissionKey, recoveredSubmission);
+@@ -1073,12 +1081,28 @@ function ActivityViewer({
+     })();
+   };
+ 
+-  const submit = async () => {
++  const submit = async (blankRequested = false) => {
+     if (readOnly || retryBlocked || submitInFlight.current) return;
+-    const openGraded = ["open", "decision", "mission", "text"].includes(activity.kind);
++    if (blankRequested && (answer.trim() || procedure.trim() || Object.keys(mapping).length ||
++        pendingGradeSubmission.current && !pendingBlank.current)) {
++      setSubmissionNotice({ kind: "error", text: "Conserva o buida l’esborrany i resol l’enviament pendent abans d’entregar en blanc." });
++      return;
++    }
++    const explicitBlank = blankRequested || pendingBlank.current;
++    const emptyEditor = activity.kind === "match" ? Object.values(mapping).every(value => !value.trim())
++      : activity.kind === "order" ? ordered.length === 0
++      : activity.kind === "numeric" ? !answer.trim() && !procedure.trim() : !answer.trim();
++    if (!explicitBlank && emptyEditor) {
++      setSubmissionNotice({ kind: "error", text: "Encara no has escrit o seleccionat cap resposta. Si vols entregar en blanc, tria «No sé la resposta (0 punts)» i confirma-ho." });
++      return;
++    }
++    if (explicitBlank && preview) return;
++    const openGraded = explicitBlank || ["open", "decision", "mission", "text"].includes(activity.kind);
+     const attemptsBeforeSubmit = attempts;
+-    const serializedText = typeof serialised === "string" ? serialised : JSON.stringify(serialised);
+-    const pending = getPendingSubmission("GRADE", serializedText, attemptsBeforeSubmit);
++    const serializedText = explicitBlank ? "" : typeof serialised === "string" ? serialised : JSON.stringify(serialised);
++    const pending = getPendingSubmission("GRADE", explicitBlank ? "[EXPLICIT_NO_ANSWER]" : serializedText, attemptsBeforeSubmit);
++    pendingBlank.current = explicitBlank;
++    setBlankPending(explicitBlank);
+     const submissionStartedAt = Date.now();
+     submitInFlight.current = true;
+     setSubmissionNotice(null);
+@@ -1113,7 +1137,8 @@ function ActivityViewer({
+           payload: { answer: serializedText, variant, attemptsBefore: attemptsBeforeSubmit,
+             attemptNumber: attemptsBeforeSubmit + 1, activityType: activity.kind,
+             recoveryContext: await buildAnswerRecoveryContext(activity, attemptSettings, maxGradedAttempts, originalActivity || activity),
+-            kind: activity.kind, helpCount: requestedHelpCount },
++            kind: activity.kind, helpCount: requestedHelpCount,
++            ...(explicitBlank ? { submissionMode: "EXPLICIT_NO_ANSWER", explicitConfirmation: true } : {}) },
+           status: "PROCESSING",
+           createdAt: pending.createdAt
+         });
+@@ -1124,7 +1149,7 @@ function ActivityViewer({
+       let nextGrade: Exclude<GradeState, null>;
+       let serverProgress: StudentProgress | null = null;
+       
+-      if (activity.kind === "numeric") {
++      if (activity.kind === "numeric" && !explicitBlank) {
+         nextGrade = gradeNumericProcedure(activity, answer, procedure);
+       } else if (openGraded) {
+           const gradeRequest = {
+@@ -1135,7 +1160,7 @@ function ActivityViewer({
+           };
+           let gradeResponse: any;
+           for (let retry = 0; retry < 3; retry += 1) {
+-            try { gradeResponse = await apiCall("grade_open", gradeRequest); break; }
++            try { gradeResponse = await apiCall(explicitBlank ? "submit_no_answer" : "grade_open", gradeRequest); break; }
+             catch (error) {
+               const code = String((error as { code?: string })?.code || "");
+               if (retry === 2 || !/^(?:BACKEND_TIMEOUT|BACKEND_NETWORK|BACKEND_NON_JSON|BACKEND_HTTP_404|BACKEND_HTTP_5\d\d)$/.test(code)) throw error;
+@@ -1190,6 +1215,7 @@ function ActivityViewer({
+         onProgressSaved?.(newProgress, { badges: [], avatars: [], initialAvatarChoice: false });
+         
+         clearPendingSubmission("GRADE", pending.submissionId);
++        pendingBlank.current = false; setBlankPending(false);
+       } else setGrade(nextGrade);
+     } catch (error) {
+       const serverError = error as Error & { code?: string; progress?: StudentProgress };
+@@ -1467,10 +1493,12 @@ function ActivityViewer({
+           {activity.data && <div className="data-strip">{activity.data.map((datum) => <span key={datum}>{ct(datum, language)}</span>)}</div>}
+           <h2>{ct(activity.prompt, language)}</h2>
+           {variant > 0 && <div className="activity-variant">ACTIVITAT DE REFORÇ</div>}
+-          <AnswerEditor activity={activity} answer={answer} setAnswer={setAnswer} procedure={procedure} setProcedure={setProcedure} ordered={ordered} setOrdered={setOrdered} mapping={mapping} setMapping={setMapping} choiceOptions={choiceOptions} matchItems={matchItems} matchGroups={matchGroups} disabled={readOnly || submissionBusy} onTextTransferBlocked={preview ? undefined : textTransferBlocked} />
++          <AnswerEditor activity={activity} answer={answer} setAnswer={setAnswer} procedure={procedure} setProcedure={setProcedure} ordered={ordered} setOrdered={setOrdered} mapping={mapping} setMapping={setMapping} choiceOptions={choiceOptions} matchItems={matchItems} matchGroups={matchGroups} disabled={readOnly || submissionBusy || blankPending} onTextTransferBlocked={preview ? undefined : textTransferBlocked} />
+           {!preview && !readOnly && <div className="answer-actions">
+             <button className="secondary-button" type="button" onClick={requestHelp} disabled={submissionBusy || retryBlocked || helpLevel >= 3}>{helpButtonLabel}</button>
+-            <button className="primary-button" type="button" onClick={submit} disabled={submissionBusy || retryBlocked}>{loading ? "Guardant i revisant…" : retryBlocked ? "Espera un moment…" : attempts === 1 ? "Millorar resposta" : "Comprovar resposta"}</button>
++            <button className="primary-button" type="button" onClick={() => void submit()} disabled={submissionBusy || retryBlocked}>{loading ? "Guardant i revisant…" : retryBlocked ? "Espera un moment…" : attempts === 1 ? "Millorar resposta" : "Comprovar resposta"}</button>
++            {!preview && <button type="button" className="text-button" disabled={submissionBusy || retryBlocked || Boolean(answer.trim() || procedure.trim() || Object.keys(mapping).length)} onClick={() => { if (pendingGradeSubmission.current && !pendingBlank.current) { setSubmissionNotice({ kind: "error", text: "Hi ha un enviament original pendent. Continua el mateix enviament abans de començar-ne un altre." }); return; } setBlankConfirmation(true); }}>No sé la resposta (0 punts)</button>}
++            {blankConfirmation && <ExplicitBlankConfirmation busy={submissionBusy} onCancel={() => setBlankConfirmation(false)} onConfirm={() => { setBlankConfirmation(false); void submit(true); }} />}
+           </div>}
+           {!preview && !readOnly && <small className="help-cost">Les pistes no baixen la nota acadèmica; cada nivell resta només 1 punt de l’energia que pots guanyar.</small>}
+           {!preview && !readOnly && <small className="attempt-policy">{attempts === 0
+@@ -3635,19 +3663,7 @@ function TeacherApp({ onExit }: { onExit: () => void }) {
+             onOpenGuide={() => setDrawer(activityById.get(item.activityId) || null)}
+             onResolve={resolveReview}
+           />)}</div>}
+-        <section className="technical-incident-panel">
+-          <header><h2>Respostes pendents de qualificació</h2><b>{pendingGradeAnswers.length}</b></header>
+-          <div className="technical-incident-list">{pendingGradeAnswers.map(({ event, state, reason }) => <article key={event.eventId}>
+-            <strong>{event.activityId} · {new Date(event.createdAt).toLocaleString("ca-ES")}</strong>
+-            <b>{state === "NON_RECOVERABLE" ? "Pendent de revisió manual" : state === "GRADING" ? "Qualificant" : "Qualificació pendent"}</b>
+-            <p>{reason}</p>
+-            <details><summary>Revisar resposta original</summary>
+-              <p style={{ whiteSpace: "pre-wrap" }}>{String(event.payload.answer ?? "Contingut no disponible")}</p>
+-              <small>Intent {Number(event.payload.attemptsBefore || 0) + 1} · {event.submissionId}</small>
+-              <button type="button" onClick={() => setDrawer(activityById.get(event.activityId) || null)}>Veure activitat i rúbrica</button>
+-            </details>
+-          </article>)}</div>
+-        </section>
++        <PendingQualificationPanel refreshKey={pendingGradeAnswers} students={dashboardStudents} onOpenActivity={(id) => setDrawer(activityById.get(id) || null)} />
+         <section className="technical-incident-panel">
+           <header><div><span className="kicker">REGISTRE TÈCNIC RECENT</span><h2>Confirmació dels enviaments</h2></div><b>{activeTechnicalIncidents.length} actius</b></header>
+           <button type="button" className="text-button" onClick={() => setShowResolvedTechnical((current) => !current)}>{showResolvedTechnical ? `Veure actius (${activeTechnicalIncidents.length})` : `Veure resolts (${resolvedTechnicalIncidents.length})`}</button>
+diff --git a/app/components/ExplicitBlankConfirmation.tsx b/app/components/ExplicitBlankConfirmation.tsx
+new file mode 100644
+index 0000000..6db63a8
+--- /dev/null
++++ b/app/components/ExplicitBlankConfirmation.tsx
+@@ -0,0 +1,7 @@
++export function ExplicitBlankConfirmation({ busy, onCancel, onConfirm }: { busy: boolean; onCancel: () => void; onConfirm: () => void }) {
++  return <div role="dialog" aria-modal="true" aria-label="Confirmar entrega en blanc" className="explicit-blank-confirmation">
++    <p>Vols entregar aquesta activitat sense resposta? Obtindràs 0 punts i comptarà com un intent.</p>
++    <button type="button" disabled={busy} onClick={onCancel}>Cancel·lar</button>
++    <button type="button" disabled={busy} onClick={onConfirm}>Confirmar l’entrega en blanc</button>
++  </div>;
++}
+diff --git a/app/components/PendingQualificationPanel.tsx b/app/components/PendingQualificationPanel.tsx
+new file mode 100644
+index 0000000..b8e5a81
+--- /dev/null
++++ b/app/components/PendingQualificationPanel.tsx
+@@ -0,0 +1,87 @@
++"use client";
++import { useEffect, useRef, useState } from "react";
++import { apiCall, firebasePath, initFirebase } from "../../lib/services";
++import { qualificationCases, qualificationLabels, type QualificationCase } from "../../lib/pending-qualification";
++
++export function PendingQualificationPanel({ refreshKey, students, onOpenActivity }: {
++  refreshKey: unknown; students: Array<{ id: string; name: string }>; onOpenActivity: (id: string) => void;
++}) {
++  const [cases, setCases] = useState<QualificationCase[]>([]);
++  const [refresh, setRefresh] = useState(0);
++  const [notice, setNotice] = useState("");
++  useEffect(() => {
++    let active = true;
++    const db = initFirebase();
++    if (!db) return;
++    void Promise.all(["events", "backendGrades", "pendingAnswerManagement"].map(path => db.ref(firebasePath("academic", path)).once("value")))
++      .then(([events, grades, management]) => { if (active) setCases(qualificationCases(events.val() || {}, grades.val() || {}, management.val() || {})); })
++      .catch(() => { if (active) setNotice("No s’ha pogut carregar la gestió de pendents. No s’ha modificat cap dada."); });
++    return () => { active = false; };
++  }, [refreshKey, refresh]);
++  return <section className="technical-incident-panel pending-qualification-panel"><header><h2>Gestió de qualificacions pendents</h2><b>{cases.length}</b></header>
++    <p>Les revisions pedagògiques revisen notes existents. Ací es gestionen enviaments sense qualificació i incidències de sincronització.</p>
++    <button type="button" onClick={() => setRefresh(n => n + 1)}>Actualitzar</button>
++    {notice && <p role="status">{notice}</p>}
++    <div className="technical-incident-list">{cases.map(item => <PendingCase key={item.event.eventId} item={item}
++      name={students.find(s => s.id === item.event.studentId)?.name || item.event.studentId} onOpenActivity={onOpenActivity}
++      onSaved={() => setRefresh(n => n + 1)} />)}</div>
++  </section>;
++}
++
++function PendingCase({ item, name, onOpenActivity, onSaved }: { item: QualificationCase; name: string; onOpenActivity: (id: string) => void; onSaved: () => void }) {
++  const inFlight = useRef(false);
++  const resolutionOperation = useRef<string | null>(null);
++  const [preview, setPreview] = useState<{ ticket: string; expectedHash: string } | null>(null);
++  const [busy, setBusy] = useState(false), [notice, setNotice] = useState("");
++  const [disposition, setDisposition] = useState("PENDING_DECISION");
++  const [confirm, setConfirm] = useState<"RECOVER" | "RESOLVE" | null>(null);
++  const event = item.event;
++  const identity = { studentId: event.studentId, activityId: event.activityId, submissionId: event.submissionId };
++  const context = event.payload.recoveryContext as { activitySnapshot?: { prompt?: string; rubric?: unknown } } | undefined;
++  async function request(action: string, payload: Record<string, unknown>) {
++    if (inFlight.current) return;
++    inFlight.current = true;
++    setBusy(true); setNotice("");
++    try {
++      const result = await apiCall(action, { ...identity, ...payload });
++      if (action === "teacher_pending_preview") { setPreview({ ticket: result.ticket, expectedHash: result.expectedHash }); setConfirm("RECOVER"); }
++      else { resolutionOperation.current = null; setConfirm(null); setPreview(null); setNotice("Operació confirmada. Els originals es conserven."); onSaved(); }
++    } catch (error) { setNotice(error instanceof Error ? error.message : "Operació aturada; cal tornar a comprovar el mateix enviament."); setConfirm(null); }
++    finally { inFlight.current = false; setBusy(false); }
++  }
++  return <article><strong>{name} · {event.activityId} · {new Date(event.createdAt).toLocaleString("ca-ES")}</strong>
++    <b>{qualificationLabels[item.state]}</b><p>{item.reason}</p>
++    <details><summary>Revisar resposta original</summary>
++      <p style={{ whiteSpace: "pre-wrap" }}>{typeof event.payload.answer === "string" ? event.payload.answer || "(Sense resposta)" : "Contingut no disponible"}</p>
++      <small>Intent {Number(event.payload.attemptsBefore || 0) + 1} · Variant {Number(event.payload.variant || 0)} · {event.submissionId}</small>
++      <p>ANSWER: conservat · GRADE: {item.hasGrade ? "existent" : "absent"} · Resultat backend: {item.hasBackend ? "existent" : "absent"}</p>
++      <p>Enunciat original: {context?.activitySnapshot?.prompt || "Context històric no disponible"}</p>
++      <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(context?.activitySnapshot?.rubric || [], null, 2)}</pre>
++      <p>Enviaments posteriors: {item.later.join(", ") || "Cap"}</p>
++      <button type="button" onClick={() => onOpenActivity(event.activityId)}>Veure activitat i rúbrica actuals</button>
++      <details><summary>Historial administratiu</summary><pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(item.history, null, 2)}</pre></details>
++    </details>
++    <button type="button" disabled={busy || !item.canPreview} onClick={() => void request("teacher_pending_preview", {})}>Preparar recuperació individual</button>
++    {!item.canPreview && <small>Recuperació bloquejada: {item.reason}</small>}
++    <label>Resolució administrativa <select disabled={busy} value={disposition} onChange={e => { resolutionOperation.current = null; setDisposition(e.target.value); }}>
++      <option value="PENDING_DECISION">Pendent de decisió acadèmica</option><option value="SUBSTITUTED">Substituïda</option>
++      <option value="EMPTY">Buida, sense evidència qualificable</option><option value="UNRECOVERABLE">No recuperable</option>
++      <option value="TECHNICAL_RESOLVED">Incidència tècnica resolta</option>
++    </select></label>
++    <button type="button" disabled={busy} onClick={() => setConfirm("RESOLVE")}>Preparar resolució sense nota</button>
++    {confirm && <div role="dialog" aria-modal="true" aria-label="Autoritzar operació individual">
++      <p>{confirm === "RECOVER" ? "Autoritzes recuperar només este enviament original? Pot consumir una qualificació del model i la reparació prevista. No es crea un altre intent." : "Confirma esta resolució administrativa individual. No genera notes ni elimina la resposta."}</p>
++      <button type="button" disabled={busy} onClick={() => setConfirm(null)}>Cancel·lar</button>
++      <button type="button" disabled={busy} onClick={() => {
++        if (confirm === "RECOVER" && preview) void request("teacher_recover_pending", { ...preview, confirmRecovery: true });
++        else void (async () => {
++          // Hash is calculated from the original immutable record, never a caller-supplied mark.
++          const { pendingAnswerHash } = await import("../../lib/pending-qualification-hash");
++          resolutionOperation.current ||= crypto.randomUUID();
++          await request("teacher_resolve_pending", { disposition, confirmResolution: true, operationId: resolutionOperation.current, expectedHash: await pendingAnswerHash(event) });
++        })();
++      }}>Confirmar operació</button>
++    </div>}
++    {notice && <p role="status">{notice}</p>}
++  </article>;
++}
+diff --git a/app/globals.css b/app/globals.css
+index e430663..4026378 100644
+--- a/app/globals.css
++++ b/app/globals.css
+@@ -1217,3 +1217,22 @@ h1, h2, h3, p { margin-top: 0; }
+ 
+ .unit-control-list article { flex-wrap: wrap; }
+ .unit-control-list .unit-grading-policy { flex-basis: 100%; border-top: 1px solid #d3ddd7; padding-top: .7rem; color: #173f43; font-weight: 600; }
++
++/* Explicit blank delivery: keep the confirmation readable below the action row. */
++.answer-actions:has(> .explicit-blank-confirmation) { flex-wrap: wrap; }
++.explicit-blank-confirmation { flex: 1 0 100%; padding: 18px; border: 2px solid var(--navy); border-radius: 12px; background: var(--paper-2); text-align: left; }
++.explicit-blank-confirmation p { margin: 0 0 14px; }
++.explicit-blank-confirmation button { padding: 10px 16px; margin: 0 12px 6px 0; border: 1px solid var(--navy); border-radius: 8px; background: white; color: var(--navy); cursor: pointer; }
++.explicit-blank-confirmation button:last-child { background: var(--navy); color: white; }
++.explicit-blank-confirmation button:disabled { opacity: .55; cursor: wait; }
++
++/* Pending qualification cards contain original text and must not use incident-table columns. */
++.pending-qualification-panel .technical-incident-list > article { display: block; min-width: 0; padding: 18px; }
++.pending-qualification-panel article > strong, .pending-qualification-panel article > b, .pending-qualification-panel article > small { display: block; margin-bottom: 8px; }
++.pending-qualification-panel article > details { width: 100%; margin: 12px 0; }
++.pending-qualification-panel pre { max-width: 100%; overflow-wrap: anywhere; }
++.pending-qualification-panel article > label { display: block; margin: 12px 0; }
++.pending-qualification-panel select { display: block; max-width: 100%; padding: 8px; }
++.pending-qualification-panel button { padding: 8px 12px; margin: 4px 8px 4px 0; border: 1px solid var(--line); border-radius: 8px; background: white; cursor: pointer; }
++.pending-qualification-panel button:disabled { opacity: .55; cursor: not-allowed; }
++.pending-qualification-panel [role="dialog"] { display: block; padding: 16px; margin-top: 12px; border: 2px solid var(--navy); border-radius: 12px; background: var(--paper-2); }
+diff --git a/lib/pending-qualification-hash.ts b/lib/pending-qualification-hash.ts
+new file mode 100644
+index 0000000..f5e5dc8
+--- /dev/null
++++ b/lib/pending-qualification-hash.ts
+@@ -0,0 +1,13 @@
++import type { AcademicEvent } from "./academic-queue";
++// Match the backend writer even for an incomplete legacy record with absent fields.
++function canonicalJson(value: unknown): string | undefined {
++  if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
++  if (value && typeof value === "object") return "{" + Object.keys(value).sort().map(k => JSON.stringify(k) + ":" + canonicalJson((value as Record<string, unknown>)[k])).join(",") + "}";
++  return JSON.stringify(value);
++}
++export async function pendingAnswerHash(event: AcademicEvent) {
++  const stable = canonicalJson({ eventId: event.eventId, submissionId: event.submissionId, studentId: event.studentId,
++    unitId: event.unitId, activityId: event.activityId, sessionId: event.sessionId, type: event.type, sequence: event.sequence, createdAt: event.createdAt, payload: event.payload });
++  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(stable)));
++  return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2,"0")).join("");
++}
+diff --git a/lib/pending-qualification.ts b/lib/pending-qualification.ts
+new file mode 100644
+index 0000000..f0d4e28
+--- /dev/null
++++ b/lib/pending-qualification.ts
+@@ -0,0 +1,41 @@
++import type { AcademicEvent } from "./academic-queue";
++import { hasConfirmedGrade } from "./grade-contract";
++
++export type PendingManagement = { resolution?: { disposition: string; status: string }; history?: Record<string, unknown> };
++export type QualificationCase = {
++  event: AcademicEvent; state: string; reason: string; canPreview: boolean;
++  later: string[]; hasGrade: boolean; hasBackend: boolean; history: unknown[];
++};
++export const qualificationLabels: Record<string, string> = {
++  FIRST_GRADE_PENDING: "Pendent de primera qualificació", RECOVERABLE: "Recuperable",
++  GRADE_CONFIRMED: "Qualificació confirmada i sincronitzada",
++  SYNC_PENDING: "Qualificació existent pendent de sincronització", SUBSTITUTED: "Resposta substituïda",
++  EMPTY: "Resposta buida", DECISION_REQUIRED: "Requereix decisió docent",
++  ADMIN_RESOLVED: "Incidència resolta administrativament", UNRECOVERABLE: "No recuperable amb les evidències actuals",
++};
++
++/** Advisory classification only. Eligibility and authorisation are rechecked by the server. */
++export function qualificationCases(events: Record<string, Record<string, AcademicEvent>> = {},
++  backends: Record<string, Record<string, unknown>> = {}, management: Record<string, Record<string, PendingManagement>> = {}): QualificationCase[] {
++  return Object.entries(events).flatMap(([student, entries]) => Object.values(entries || {})
++    .filter(e => e.eventId === `${e.submissionId}-answer`).flatMap(event => {
++      const grade = entries[`${event.submissionId}-grade`];
++      const hasGrade = hasConfirmedGrade(grade?.payload.grade), hasBackend = Boolean(backends[student]?.[event.submissionId]);
++      const meta = management[student]?.[event.submissionId];
++      if (hasGrade && grade.status === "SYNCED" && !meta) return [];
++      const later = Object.values(entries).filter(e => e.activityId === event.activityId && e.submissionId !== event.submissionId && e.createdAt > event.createdAt).map(e => e.submissionId);
++      const context = event.payload.recoveryContext as { schemaVersion?: string } | undefined;
++      const declared = event.payload.answer === "" && event.payload.submissionMode === "EXPLICIT_NO_ANSWER" && event.payload.explicitConfirmation === true;
++      let state = "FIRST_GRADE_PENDING", reason = "Cal verificar el context original al servidor abans de recuperar.";
++      if (hasGrade && grade.status === "SYNCED") { state = "GRADE_CONFIRMED"; reason = "Resultat confirmat i projectat. Historial de recuperació conservat; no cal requalificar."; }
++      else if (hasGrade || hasBackend) { state = "SYNC_PENDING"; reason = "Consultar/reconciliar el resultat existent; no tornar a qualificar."; }
++      else if (later.length) { state = "SUBSTITUTED"; reason = "Hi ha un enviament posterior. No es recupera l’anterior."; }
++      else if (event.payload.answer === "" && !declared) { state = "EMPTY"; reason = "Sense declaració voluntària: no es pot convertir retroactivament en zero."; }
++      else if (typeof event.payload.answer !== "string") { state = "UNRECOVERABLE"; reason = "Falta el text original de la resposta."; }
++      else if (context?.schemaVersion !== "PDC_ANSWER_CONTEXT_V1") { state = "DECISION_REQUIRED"; reason = "Falta el context històric inequívoc. Recuperació automàtica bloquejada."; }
++      else if (declared || ["open", "decision", "mission", "text"].includes(String(event.payload.kind))) { state = "RECOVERABLE"; reason = "Candidat pendent de revalidació individual al servidor; no és una autorització."; }
++      if (meta?.resolution?.status === "RESOLVED") { state = "ADMIN_RESOLVED"; reason = `Resolució administrativa: ${meta.resolution.disposition}. No modifica la nota ni l’ANSWER.`; }
++      else if (meta?.resolution?.disposition === "PENDING_DECISION") { state = "DECISION_REQUIRED"; reason = "Decisió acadèmica pendent registrada pel docent."; }
++      return [{ event, state, reason, canPreview: state === "RECOVERABLE", later, hasGrade, hasBackend, history: Object.values(meta?.history || {}) }];
++    })).sort((a,b) => b.event.createdAt - a.event.createdAt);
++}
+diff --git a/lib/services.ts b/lib/services.ts
+index d4ab6d9..1e71ff2 100644
+--- a/lib/services.ts
++++ b/lib/services.ts
+@@ -260,7 +260,7 @@ export async function apiCallBackend(action: string, payload: Record<string, unk
+   const requestStudentId = String(payload.studentId || activeStudentSession?.studentId || "");
+   const requestSessionId = String(payload.sessionId || activeStudentSession?.sessionId || "");
+   const controller = new AbortController();
+-  const timeoutMs = ["grade_open", "submit_open"].includes(action)
++  const timeoutMs = ["grade_open", "submit_open", "submit_no_answer", "teacher_recover_pending"].includes(action)
+     ? 145000
+     : action === "submit_correction"
+       ? 90000
+diff --git a/tests/appscript-load.test.mjs b/tests/appscript-load.test.mjs
+index ea549a6..4da0c3b 100644
+--- a/tests/appscript-load.test.mjs
++++ b/tests/appscript-load.test.mjs
+@@ -90,7 +90,7 @@ test("l'enviament és idempotent, es recupera després d'un 404 i manté la pant
+   assert.match(services, /145000/);
+   assert.match(app, /submission-lock-overlay/);
+   assert.match(app, /aria-busy=\{submissionBusy\}/);
+-  assert.match(app, /disabled=\{readOnly \|\| submissionBusy\}/);
++  assert.match(app, /disabled=\{readOnly \|\| submissionBusy(?: \|\| blankPending)?\}/);
+   assert.match(app, /correctionInFlight\.current/);
+   assert.match(app, /crypto\.randomUUID/);
+   assert.match(app, /pdc-pending-submission-v1/);
+diff --git a/tests/curriculum.test.mjs b/tests/curriculum.test.mjs
+index 64970f7..379d105 100644
+--- a/tests/curriculum.test.mjs
++++ b/tests/curriculum.test.mjs
+@@ -152,7 +152,7 @@ test("Sheets, Firebase i la clau d'IA queden separats del frontal", () => {
+   assert.doesNotMatch(views, /gradingMode: "numeric_procedure"/);
+ 
+   assert.match(views, /academicQueue\.enqueue\(\{[\s\S]*?status:\s*"PROCESSING"/);
+-  assert.match(views, /apiCall\("grade_open"/);
++  assert.match(views, /apiCall\((?:"grade_open"|explicitBlank \? "submit_no_answer" : "grade_open")/);
+   assert.match(views, /academicQueue\.enqueue\(\{[\s\S]*?status:\s*"SYNC_PENDING"/);
+   assert.doesNotMatch(views, /apiCall\("submit_open"/);
+   assert.match(backend, /function pdcSubmitOpen_/);
+diff --git a/tests/non-ai-persistence.test.mjs b/tests/non-ai-persistence.test.mjs
+index 1ad46ef..c99aea2 100644
+--- a/tests/non-ai-persistence.test.mjs
++++ b/tests/non-ai-persistence.test.mjs
+@@ -59,7 +59,7 @@ test("offline or denied write never confirms the grade, retaining the response",
+ 
+ test("UI publishes SUBMITTED and progress only after durable grade confirmation", () => {
+   const source = fs.readFileSync("app/PdcApp.tsx", "utf8");
+-  const start = source.indexOf("const submit = async () =>");
++  const start = source.indexOf("const submit = async (");
+   const end = source.indexOf("const submitCorrection = async () =>", start);
+   const submit = source.slice(start, end);
+   const guard = submit.indexOf('confirmAcademicEvent(academicQueue, pending.submissionId + "-grade"');
+diff --git a/tests/pedagogical-settings.test.mjs b/tests/pedagogical-settings.test.mjs
+index 3fd8571..8035787 100644
+--- a/tests/pedagogical-settings.test.mjs
++++ b/tests/pedagogical-settings.test.mjs
+@@ -168,7 +168,7 @@ test("IA buida o malformada: la pista local és immediata i permet el segon inte
+ });
+ 
+ test("IA lenta: la petició acadèmica existent té timeout i la pista no en crea cap", () => {
+-  assert.match(serviceSource, /\["grade_open", "submit_open"\]\.includes\(action\)[\s\S]*?\? 145000/);
++  assert.match(serviceSource, /\["grade_open", "submit_open", "submit_no_answer", "teacher_recover_pending"\]\.includes\(action\)[\s\S]*?\? 145000/);
+   assert.match(serviceSource, /controller\.abort\(\)/);
+   assert.doesNotMatch(backendSource.slice(backendSource.indexOf('function pdcGradeOpen_('), backendSource.indexOf('function pdcSubmitOpen_(')), /result = pdcFallbackGrade_\(activity, answer\)/);
+   assert.match(backendSource, /catch \(error\) \{\s*errorText = error && error\.message \? error\.message : String\(error\);\s*throw error;/);
+diff --git a/tests/pending-qualification.test.mjs b/tests/pending-qualification.test.mjs
+new file mode 100644
+index 0000000..1671bfe
+--- /dev/null
++++ b/tests/pending-qualification.test.mjs
+@@ -0,0 +1,220 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import {build, transform} from 'esbuild';
++import vm from 'node:vm';
++import {pendingBackend} from './support/pending-backend.mjs';
++const bundle=await build({stdin:{contents:"export * from './lib/pending-qualification';export * from './lib/pending-qualification-hash';export * from './lib/academic-progress';export {ExplicitBlankConfirmation} from './app/components/ExplicitBlankConfirmation';",resolveDir:process.cwd()},bundle:true,write:false,platform:'node',format:'esm'});
++const api=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
++
++test('teacher: real teacher session required; pupil lease and wrong group do not grant teacher authority',()=>{
++ const f=pendingBackend();f.answer();assert.throws(()=>f.ctx.pdcTeacherPendingPreview_({...f.teacher(),teacherToken:'wrong'}),/caducat/);
++ assert.throws(()=>f.ctx.pdcTeacherPendingPreview_({...f.teacher(),groupId:'OTHER'}),/Grup/);
++ assert.throws(()=>f.ctx.pdcTeacherPendingPreview_({...f.teacher(),studentId:'OTHER'}),/autoritzat/);
++ assert.equal(f.ctx.pdcTeacherPendingPreview_(f.teacher()).eligible,true);assert.equal(f.calls(),0);
++});
++test('teacher: recover original ID without impersonating a pupil; duplicate and ACK replay reuse the grade',()=>{
++ const f=pendingBackend(),e=f.answer(),before=JSON.stringify(e),q=f.prepare();delete q.sessionId;
++ const first=f.ctx.pdcTeacherRecoverPending_(q),again=f.ctx.pdcTeacherRecoverPending_(q);
++ assert.equal(first.grade.score,6);assert.equal(again.recovered,true);assert.equal(f.calls(),1);
++ assert.equal(JSON.stringify(f.read(f.root+'/events/SYNTHETIC/s1-answer')),before);
++ assert.equal(Object.keys(f.read(f.root+'/events/SYNTHETIC')).length,2);
++ assert.equal(Object.keys(f.read(f.root+'/pendingAnswerManagement/SYNTHETIC/s1/history')).length,1);
++});
++for(const [name,change] of [
++ ['missing context',e=>delete e.payload.recoveryContext],['empty historical answer',e=>e.payload.answer=''],
++ ['changed rubric',e=>e.payload.recoveryContext.activitySnapshot.rubric[0].points=9],
++ ['changed original policy',e=>e.payload.recoveryContext.scorePolicySnapshot='BEST_ATTEMPT'],
++ ['inconsistent attempt',e=>e.payload.attemptNumber=2],
++]) test('teacher guard: '+name,()=>{const f=pendingBackend(),e=f.answer();change(e);f.set(f.root+'/events/SYNTHETIC/s1-answer',e);assert.throws(()=>f.prepare());assert.equal(f.calls(),0);});
++test('teacher: newer sibling blocks preview and an already authorised recovery',()=>{
++ const f=pendingBackend();f.answer();const q=f.prepare();const later=f.answer('s2');later.createdAt=2000;f.set(f.root+'/events/SYNTHETIC/s2-answer',later);
++ assert.throws(()=>f.prepare(),/posterior/);assert.throws(()=>f.ctx.pdcTeacherRecoverPending_(q),/posterior/);assert.equal(f.calls(),0);
++});
++test('teacher: changed current policy, teacher override or equivalent legacy grade blocks',()=>{
++ for(const mode of ['policy','override','equivalent']){const f=pendingBackend();f.answer();const q=f.prepare(),path='GamificacioPDC/teacherState/TEST';const s=f.read(path);
++ if(mode==='policy')s.settings={...s.dashboard.pedagogicalSettings,scorePolicy:'BEST_ATTEMPT'};
++ if(mode==='override')s.studentUpdates={SYNTHETIC:{'u03-05':{teacherOverrideScore:7}}};
++ if(mode==='equivalent')s.dashboard.progressOverview=[{studentId:'SYNTHETIC',activityId:'u03-05',score:7}];f.set(path,s);
++ assert.throws(()=>f.ctx.pdcTeacherRecoverPending_(q));assert.equal(f.calls(),0);}
++});
++test('teacher: explicit operation authorisation and server-issued matching ticket required; no client grade accepted',()=>{
++ const f=pendingBackend();f.answer();const q=f.prepare();
++ for(const extra of [{confirmRecovery:false},{ticket:'forged'},{expectedHash:'wrong'},{score:10},{grade:{}},{answer:'changed'}])assert.throws(()=>f.ctx.pdcTeacherRecoverPending_({...q,...extra}));assert.equal(f.calls(),0);
++});
++test('teacher: current canonical answer changed after preview is rejected',()=>{const f=pendingBackend();const e=f.answer(),q=f.prepare();e.payload.answer='Different';f.set(f.root+'/events/SYNTHETIC/s1-answer',e);assert.throws(()=>f.ctx.pdcTeacherRecoverPending_(q),/canviat/);assert.equal(f.calls(),0);});
++test('teacher: concurrent activity claim blocks a second submission',()=>{
++ const f=pendingBackend();f.answer();const q=f.prepare();f.duringGrade(()=>assert.throws(()=>f.ctx.pdcTeacherRecoverPending_(q),/processant/));f.ctx.pdcTeacherRecoverPending_(q);assert.equal(f.calls(),1);
++});
++test('teacher: backend grade without matching GRADE blocks rather than calling the model',()=>{
++ const f=pendingBackend();f.answer();f.set(f.root+'/backendGrades/SYNTHETIC/s1',{grade:{score:0,status:'incorrect',feedback:'Existing'},telemetry:{studentId:'SYNTHETIC',activityId:'u03-05',submissionId:'s1'}});assert.throws(()=>f.prepare(),/parcial/);assert.equal(f.calls(),0);
++});
++test('administration: immutable original hash matches browser; disposition only writes metadata, idempotently',async()=>{
++ const f=pendingBackend(),e=f.answer(),academicBefore=JSON.stringify(f.read(f.root+'/events'));
++ const hash=await api.pendingAnswerHash(e);assert.equal(hash,f.ctx.pdcPendingAnswerHash_(e));
++ const q={...f.teacher(),expectedHash:hash,operationId:'admin-1',confirmResolution:true,disposition:'PENDING_DECISION'};
++ f.ctx.pdcTeacherResolvePending_(q);assert.equal(f.ctx.pdcTeacherResolvePending_(q).duplicate,true);
++ assert.equal(JSON.stringify(f.read(f.root+'/events')),academicBefore);assert.equal(f.read(f.root+'/backendGrades'),null);assert.equal(f.calls(),0);
++ assert.throws(()=>f.ctx.pdcTeacherResolvePending_({...q,disposition:'SUBSTITUTED'}));
++});
++test('administration: supersession and empty disposition require evidence; no zero or historical auto-resolution',()=>{
++ const f=pendingBackend(),e=f.answer();const q={...f.teacher(),expectedHash:f.ctx.pdcPendingAnswerHash_(e),operationId:'admin-1',confirmResolution:true};
++ assert.throws(()=>f.ctx.pdcTeacherResolvePending_({...q,disposition:'EMPTY'}));assert.throws(()=>f.ctx.pdcTeacherResolvePending_({...q,disposition:'SUBSTITUTED'}));assert.equal(f.read(f.root+'/pendingAnswerManagement'),null);
++ f.answer('s2');const later=f.read(f.root+'/events/SYNTHETIC/s2-answer');later.createdAt=2000;f.set(f.root+'/events/SYNTHETIC/s2-answer',later);f.ctx.pdcTeacherResolvePending_({...q,disposition:'SUBSTITUTED'});assert.equal(f.calls(),0);
++});
++for(const [kind,id] of [['open','u03-05'],['decision','u03-07'],['mission','u03-08'],['text','u03-09'],['numeric','u03-01'],['choice','u03-02'],['order','u03-03'],['match','u03-04']])test('explicit blank '+kind+': server grade exactly zero, no OpenAI or repair, same ID',()=>{
++ const f=pendingBackend(),e=f.answer('s1',id,true);const result=f.ctx.pdcGradeExplicitBlank_(f.request('s1',id));
++ assert.equal(result.grade.score,0);assert.equal(result.grade.feedback,'No has presentat cap resposta. Qualificació: 0/10.');assert.equal(result.grade.cause,'EXPLICIT_NO_ANSWER');assert.equal(f.calls(),0);
++ assert.equal(result.progress.gradedAttempts,1);assert.equal(result.progress.locked,false);assert.equal(result.progress.lastSubmissionId,'s1');
++ assert.equal(f.read(f.root+'/events/SYNTHETIC/s1-answer').createdAt,e.createdAt);
++ assert.equal(f.ctx.pdcGradeExplicitBlank_(f.request('s1',id)).recovered,true);assert.equal(Object.keys(f.read(f.root+'/events/SYNTHETIC')).length,2);
++});
++test('explicit blank: historical empty, lost text, nonempty flag and invalid pupil lease never manufacture zeros',()=>{
++ for(const mode of ['legacy','unconfirmed','nonempty','lease','score']) { const f=pendingBackend(),e=f.answer('s1','u03-05',true);
++ if(mode==='legacy')delete e.payload.submissionMode;if(mode==='unconfirmed')delete e.payload.explicitConfirmation;if(mode==='nonempty')e.payload.answer='Actual response';
++ f.set(f.root+'/events/SYNTHETIC/s1-answer',e);const q=f.request();if(mode==='lease')q.sessionId='wrong';if(mode==='score')q.score=9;
++ assert.throws(()=>f.ctx.pdcGradeExplicitBlank_(q));assert.equal(f.read(f.root+'/backendGrades'),null);assert.equal(f.calls(),0); }
++});
++test('explicit blank cannot change an existing incompatible canonical answer or bypass a lock',()=>{
++ const f=pendingBackend();f.answer();assert.throws(()=>f.ctx.pdcGradeExplicitBlank_(f.request()));assert.equal(f.calls(),0);
++ const g=pendingBackend();g.answer('s1','u03-05',true);g.ctx.pdcGradeExplicitBlank_(g.request());g.answer('s2','u03-05',true);assert.throws(()=>g.ctx.pdcGradeExplicitBlank_(g.request('s2')),/intent pendent/);
++});
++for(const policy of ['SECOND_ATTEMPT','BEST_ATTEMPT']) test('second blank uses frozen '+policy+' and permits continuation after two attempts',()=>{
++ const f=pendingBackend({scorePolicy:policy});f.answer();const first=f.ctx.pdcGradeOpenFirebase_(f.request());assert.equal(first.progress.score,6);
++ f.answer('s2','u03-05',true,1);const second=f.ctx.pdcGradeExplicitBlank_(f.request('s2'));
++ assert.equal(second.grade.score,0);assert.equal(second.progress.score,policy==='BEST_ATTEMPT'?6:0);assert.equal(second.progress.bestScore,6);assert.equal(second.progress.gradedAttempts,2);assert.equal(second.progress.locked,true);assert.equal(second.progress.correctionRequired,false);assert.equal(f.calls(),1);
++ f.answer('s3','u03-05',true,2);assert.throws(()=>f.ctx.pdcGradeExplicitBlank_(f.request('s3')),/intent pendent/);
++});
++test('blank first, ordinary second still uses normal corrector and original policy',()=>{const f=pendingBackend();f.answer('s1','u03-05',true);f.ctx.pdcGradeExplicitBlank_(f.request());f.answer('s2','u03-05',false,1);const result=f.ctx.pdcGradeOpenFirebase_(f.request('s2'));assert.equal(result.grade.score,6);assert.equal(result.progress.gradedAttempts,2);assert.equal(f.calls(),1);});
++test('blank: ACK lost after atomic Firebase persistence reuses zero without new grade or model',()=>{
++ const f=pendingBackend();f.answer('s1','u03-05',true);f.loseAck();assert.throws(()=>f.ctx.pdcGradeExplicitBlank_(f.request()),/ACK_LOST/);assert.equal(f.ctx.pdcGradeExplicitBlank_(f.request()).recovered,true);assert.equal(f.calls(),0);assert.equal(Object.keys(f.read(f.root+'/events/SYNTHETIC')).length,2);
++});
++test('blank: no-persist technical failure leaves original and remains retryable, no fabricated client grade',()=>{const f=pendingBackend();f.answer('s1','u03-05',true);f.failPatch();assert.throws(()=>f.ctx.pdcGradeExplicitBlank_(f.request()),/offline/);assert.equal(f.read(f.root+'/backendGrades'),null);assert.equal(f.read(f.root+'/events/SYNTHETIC/s1-grade'),null);assert.equal(f.calls(),0);assert.equal(f.ctx.pdcGradeExplicitBlank_(f.request()).grade.score,0);});
++test('blank reload and teacher classification: confirmed zero is progress, never a pending first grade',()=>{
++ const f=pendingBackend();f.answer('s1','u03-05',true);f.ctx.pdcGradeExplicitBlank_(f.request());const events=JSON.parse(JSON.stringify(f.read(f.root+'/events')));
++ assert.equal(api.progressFromEvents(events.SYNTHETIC)[0].score,0);assert.equal(api.qualificationCases(events,{SYNTHETIC:f.read(f.root+'/backendGrades/SYNTHETIC')})[0].state,'SYNC_PENDING');
++ events.SYNTHETIC['s1-grade'].status='SYNCED';assert.equal(api.qualificationCases(events,{SYNTHETIC:f.read(f.root+'/backendGrades/SYNTHETIC')}).length,0);
++});
++test('teacher may recover a newly declared blank without a model call; legacy empty stays excluded',()=>{const f=pendingBackend();f.answer('s1','u03-01',true);const q=f.prepare('s1','u03-01');assert.equal(f.ctx.pdcTeacherRecoverPending_(q).grade.score,0);assert.equal(f.calls(),0);});
++test('classification distinguishes empty, replaced, historic decision and administrative resolution without grading',()=>{
++ const f=pendingBackend(),e=f.answer();let events={SYNTHETIC:{'s1-answer':structuredClone(e)}};
++ events.SYNTHETIC['s1-answer'].payload.answer='';assert.equal(api.qualificationCases(events)[0].state,'EMPTY');
++ delete events.SYNTHETIC['s1-answer'].payload.recoveryContext;events.SYNTHETIC['s1-answer'].payload.answer='old';assert.equal(api.qualificationCases(events)[0].state,'DECISION_REQUIRED');
++ events.SYNTHETIC['s2-answer']={...e,eventId:'s2-answer',submissionId:'s2',createdAt:3000};assert.equal(api.qualificationCases(events).find(x=>x.event.submissionId==='s1').state,'SUBSTITUTED');
++ assert.equal(api.qualificationCases(events,{}, {SYNTHETIC:{s1:{resolution:{status:'RESOLVED',disposition:'SUBSTITUTED'}}}}).find(x=>x.event.submissionId==='s1').state,'ADMIN_RESOLVED');
++});
++test('all 72 automatic catalogues exactly preserve the canonical frontend activity context',async()=>{
++ const b=await build({entryPoints:['lib/curriculum.ts'],bundle:true,write:false,platform:'node',format:'esm'});const {curriculum}=await import('data:text/javascript;base64,'+Buffer.from(b.outputFiles[0].text).toString('base64'));
++ const f=pendingBackend();let count=0;for(const a of curriculum.flatMap(u=>u.activities).filter(a=>['numeric','choice','order','match'].includes(a.kind))){assert.deepEqual(JSON.parse(JSON.stringify({id:a.id,unitId:a.unitId,kind:a.kind,prompt:f.ctx.PDC_ACTIVITY_CATALOG[a.id].prompt,context:f.ctx.PDC_ACTIVITY_CATALOG[a.id].context||'',data:f.ctx.PDC_ACTIVITY_CATALOG[a.id].data||[],modelAnswer:f.ctx.PDC_ACTIVITY_CATALOG[a.id].modelAnswer,rubric:f.ctx.PDC_ACTIVITY_CATALOG[a.id].rubric||[]})),{id:a.id,unitId:a.unitId,kind:a.kind,prompt:a.prompt,context:a.context||'',data:a.data||[],modelAnswer:a.modelAnswer,rubric:a.rubric||[]});count++;}assert.equal(count,72);
++});
++test('client metadata remains server-only and both validated rules copies stay equal',()=>{const a=fs.readFileSync('public/firebase-rules.json','utf8');assert.equal(a,fs.readFileSync('PUJAR_A_GITHUB/firebase-rules.json','utf8'));const rules=JSON.parse(a).rules.GamificacioPDC.academic.$group;assert.equal(rules.pendingAnswerManagement['.write'],false);assert.match(rules.pendingAnswerManagement['.read'],/role === 'teacher'/);assert.equal(rules.backendGrades['.write'],false);});
++
++for(const id of ['u03-05','u03-01']) test('real frontend submit declares blank '+id+' and never enqueues a browser GRADE',async()=>{
++ const f=pendingBackend(),template=f.answer('s1',id,true);f.set(f.root+'/events/SYNTHETIC/s1-answer',null);
++ let activity=f.ctx.PDC_ACTIVITY_CATALOG[id],writes=[],gradeShown;
++ const app=fs.readFileSync('app/PdcApp.tsx','utf8');let snippet=app.slice(app.indexOf('  const submit = async'),app.indexOf('  const submitCorrection = async'));
++ snippet=snippet.replace('(await import("../lib/firebase-academic-service")).getAcademicQueue','getAcademicQueue');
++ const {code}=await transform(snippet+'\nglobalThis.testSubmit=submit;',{loader:'ts'});
++ const no=()=>{},ctx={readOnly:false,retryBlocked:false,submitInFlight:{current:false},pendingBlank:{current:false},pendingGradeSubmission:{current:null},answer:'',procedure:'',mapping:{},activity,unit:{id:'u03'},attempts:0,variant:0,serialised:'',preview:false,originalActivity:activity,
++  attemptSettings:template.payload.recoveryContext.pedagogicalPolicySnapshot,maxGradedAttempts:2,requestedHelpCount:0,policy:{retryCounts:true},progress:undefined,
++  getPendingSubmission:()=>({submissionId:'s1',createdAt:template.createdAt}),window:{PDC_CONFIG:{groupId:'TEST'}},readStudentSession:()=>({studentId:'SYNTHETIC',sessionId:'lease-test'}),
++  getAcademicQueue:()=>({enqueue:e=>{const saved={...e,sequence:writes.length+1};writes.push(saved);f.set(f.root+'/events/SYNTHETIC/'+e.eventId,saved);}}),
++  buildAnswerRecoveryContext:async()=>template.payload.recoveryContext,confirmAcademicEvent:async()=>true,persistAcademicEvent:no,
++  apiCall:async(action,payload)=>{assert.equal(action,'submit_no_answer');return f.ctx.pdcGradeExplicitBlank_({...payload,groupId:'TEST',sessionId:'lease-test'});},
++  requireConfirmedGrade:g=>g,setGrade:g=>gradeShown=g,setBlankPending:no,setSubmissionNotice:no,setSubmissionStage:no,setLoading:no,publishLive:async()=>{},setAttempts:no,setHelpLevel:no,onProgressSaved:no,clearPendingSubmission:no};
++ vm.runInNewContext(code,ctx);await ctx.testSubmit(true);assert.equal(gradeShown.score,0);assert.equal(writes.length,1);assert.equal(writes[0].eventId,'s1-answer');assert.equal(writes[0].payload.explicitConfirmation,true);assert.equal(f.calls(),0);
++});
++test('explicit blank concurrent duplicate is rejected while the atomic grade write owns the claim',()=>{
++ const f=pendingBackend();f.answer('s1','u03-05',true);const patch=f.ctx.pdcFirebaseAdminPatch_;let nested=0;
++ f.ctx.pdcFirebaseAdminPatch_=(path,changes)=>{if(path===f.root&&nested++===0)assert.throws(()=>f.ctx.pdcGradeExplicitBlank_(f.request()),/processant/);return patch(path,changes);};
++ f.ctx.pdcGradeExplicitBlank_(f.request());assert.equal(f.calls(),0);assert.equal(Object.keys(f.read(f.root+'/backendGrades/SYNTHETIC')).length,1);
++});
++test('blank worker projects the authoritative zero and cause once; delayed projection is independent of grading',()=>{
++ const f=pendingBackend();f.answer('s1','u03-05',true);f.ctx.pdcGradeExplicitBlank_(f.request());const rows=new Map(),logs=[],profile={id:'SYNTHETIC'};let rewardEffects=0;
++ f.ctx.pdcConfigValue_=(k,def)=>k==='GRUP_ID'?'TEST':def;f.ctx.pdcStudentProfile_=()=>profile;f.ctx.pdcTeacherProjectionWorker_=()=>{};
++ f.ctx.pdcObjects_=sheet=>sheet===f.ctx.PDC_SHEETS.AI_LOG?logs:[];f.ctx.pdcAppend_=(sheet,row)=>{if(sheet===f.ctx.PDC_SHEETS.AI_LOG)logs.push(row);};
++ // The Sheets adapter is isolated; the real worker and claims control delivery.
++ f.ctx.pdcSaveProgressFromWorker_=data=>{if(!rows.has(data.submissionId)){rows.set(data.submissionId,structuredClone(data));rewardEffects++;}return{progress:data._canonicalProgress,student:profile};};
++ f.ctx.pdcAcademicSyncWorker_();f.ctx.pdcAcademicSyncWorker_();assert.equal(rows.size,1);assert.equal(rewardEffects,1);const row=rows.get('s1');assert.equal(row.score,0);assert.equal(row._canonicalProgress.gradedAttempts,1);assert.equal(JSON.parse(row.gradeJson).cause,'EXPLICIT_NO_ANSWER');assert.equal(f.read(f.root+'/events/SYNTHETIC/s1-grade').status,'SYNCED');assert.equal(Object.keys(f.read(f.root+'/pendingEvents')||{}).length,0);assert.equal(f.calls(),0);
++});
++test('formative reinforcement retains non-counting policy for an explicit blank',()=>{
++ const f=pendingBackend();f.answer('s1','u03-01',true);const path='GamificacioPDC/teacherState/TEST',state=f.read(path);state.dashboard.assessmentPlan.activities=[{activityId:'u03-01',maxGradedAttempts:2,retryCounts:false}];state.studentUpdates={SYNTHETIC:{'u03-01':{variant:1,gradedAttempts:0,score:7,finalScore:7,status:'partial',attempts:1}}};f.set(path,state);
++ const e=f.read(f.root+'/events/SYNTHETIC/s1-answer');e.payload.variant=1;f.set(f.root+'/events/SYNTHETIC/s1-answer',e);const result=f.ctx.pdcGradeExplicitBlank_(f.request('s1','u03-01'));assert.equal(result.grade.score,0);assert.equal(result.progress.score,7);assert.equal(result.progress.retryCounts,false);assert.equal(f.calls(),0);
++});
++
++test('confirmation component: cancel makes no submission; confirm is explicit and disabled while busy',()=>{
++ let cancelled=0,submitted=0;const props={busy:false,onCancel:()=>cancelled++,onConfirm:()=>submitted++};
++ const view=api.ExplicitBlankConfirmation(props),buttons=view.props.children.filter(c=>c.type==='button');
++ buttons[0].props.onClick();assert.equal(cancelled,1);assert.equal(submitted,0);buttons[1].props.onClick();assert.equal(submitted,1);
++ assert.ok(api.ExplicitBlankConfirmation({...props,busy:true}).props.children.filter(c=>c.type==='button').every(c=>c.props.disabled));
++});
++test('teacher: another backend result for the same unconsumed attempt blocks even without its GRADE',()=>{
++ const f=pendingBackend();f.answer();f.set(f.root+'/backendGrades/SYNTHETIC/other',{activityId:'u03-05',attempt:1,grade:{score:7}});assert.throws(()=>f.prepare(),/equivalent/);assert.equal(f.calls(),0);
++});
++test('teacher: an existing canonical zero is read idempotently, with no new model call',()=>{
++ const f=pendingBackend();f.answer('s1','u03-05',true);const q=f.prepare();f.ctx.pdcTeacherRecoverPending_(q);assert.equal(f.ctx.pdcTeacherRecoverPending_(q).grade.score,0);assert.equal(f.calls(),0);
++});
++
++test('blank: even a direct correction request cannot invoke a model for the explicit no-answer grade',()=>{
++ const f=pendingBackend();let calls=0;f.ctx.pdcRequireStudentSession_=()=>{};f.ctx.pdcPrepareCorrectionProgress_=()=>{};
++ f.ctx.pdcObjects_=()=>[{AlumneId:'SYNTHETIC',ActivitatId:'u03-05',MotiuBloqueig:'MAX_INTENTS',UltimaNotaJSON:JSON.stringify({score:0,cause:'EXPLICIT_NO_ANSWER'})}];
++ f.ctx.pdcProgressLockReason_=()=> 'MAX_INTENTS';f.ctx.pdcOpenAICorrection_=()=>{calls++;throw Error('FORBIDDEN');};
++ assert.throws(()=>f.ctx.pdcSubmitCorrection_({...f.request(),activity:{id:'u03-05',kind:'open'},answer:'Un nou text de prova'}),/no necessita/);assert.equal(calls,0);
++});
++
++for(const field of ['sessionId','createdAt','sequence','type'])test('canonical identity '+field+' missing: both new routes reject before model or grade',()=>{
++ const f=pendingBackend(),e=f.answer();delete e[field];f.set(f.root+'/events/SYNTHETIC/s1-answer',e);assert.throws(()=>f.prepare());assert.equal(f.calls(),0);
++ const b=pendingBackend(),blank=b.answer('s1','u03-05',true);delete blank[field];b.set(b.root+'/events/SYNTHETIC/s1-answer',blank);assert.throws(()=>b.ctx.pdcGradeExplicitBlank_(b.request()));assert.equal(b.read(b.root+'/backendGrades'),null);assert.equal(b.calls(),0);
++});
++
++for(const formative of [false,true])test('real worker plus real save core preserve blank cause, zero, variant and non-counting policy '+formative,()=>{
++ const f=pendingBackend();const e=f.answer('s1','u03-01',true);let rewards=0;const tables={};for(const sheet of Object.values(f.ctx.PDC_SHEETS))tables[sheet]=[];
++ const policy={maxGradedAttempts:2,retryCounts:!formative};
++ if(formative){const state=f.read('GamificacioPDC/teacherState/TEST');state.dashboard.assessmentPlan.activities=[{activityId:'u03-01',...policy}];state.studentUpdates={SYNTHETIC:{'u03-01':{variant:1,gradedAttempts:0,score:7,finalScore:7,status:'partial',attempts:1}}};f.set('GamificacioPDC/teacherState/TEST',state);e.payload.variant=1;f.set(f.root+'/events/SYNTHETIC/s1-answer',e);tables[f.ctx.PDC_SHEETS.PROGRESS].push({_row:1,AlumneId:'SYNTHETIC',ActivitatId:'u03-01',Puntuacio:7,Intents:1,IntentsQualificables:0,Variant:1});}
++ f.ctx.pdcGradeExplicitBlank_(f.request('s1','u03-01'));
++ f.ctx.pdcActivityPolicy_=()=>policy;f.ctx.pdcSheet_=name=>name;f.ctx.pdcObjects_=name=>tables[name]||[];
++ f.ctx.pdcAppend_=(name,row)=>tables[name].push({...row,_row:tables[name].length+1});f.ctx.pdcWriteRow_=(name,index,fields)=>{Object.assign(tables[name][index-1],fields);};
++ f.ctx.pdcStudentProfile_=()=>({id:'SYNTHETIC'});f.ctx.pdcEnsureAvatarUnlocks_=()=>[];f.ctx.pdcCompleteReinforcement_=()=>false;f.ctx.pdcProgressRewards_=()=>{rewards++;return{badges:[],avatars:[]};};
++ f.ctx.pdcConfigValue_=(k,d)=>k==='GRUP_ID'?'TEST':d;f.ctx.pdcTeacherProjectionWorker_=()=>{};
++ f.ctx.pdcAcademicSyncWorker_();f.ctx.pdcAcademicSyncWorker_();
++ const answers=tables[f.ctx.PDC_SHEETS.ANSWERS],progress=tables[f.ctx.PDC_SHEETS.PROGRESS];assert.equal(answers.length,1);assert.equal(progress.length,1);assert.equal(answers[0].Puntuacio,0);assert.equal(answers[0].OrigenNota,'EXPLICIT_NO_ANSWER');assert.equal(progress[0].Puntuacio,formative?7:0);assert.equal(progress[0].ReintentPondera,formative?'NO':'SI');assert.equal(progress[0].Variant,formative?1:0);assert.equal(JSON.parse(progress[0].UltimaNotaJSON).cause,'EXPLICIT_NO_ANSWER');assert.equal(rewards,formative?0:1);
++ const projected=f.read('GamificacioPDC/teacherState/TEST/studentUpdates/SYNTHETIC/u03-01');assert.equal(projected.retryCounts,!formative);assert.equal(projected.variant,formative?1:0);assert.equal(f.read(f.root+'/events/SYNTHETIC/s1-grade').status,'SYNCED');assert.equal(f.calls(),0);
++});
++
++test('automatic blank: status recovers canonical zero before Sheets; accidental legacy empties do not use this route',()=>{
++ const f=pendingBackend();f.answer('s1','u03-01',true);f.ctx.pdcGradeExplicitBlank_(f.request('s1','u03-01'));f.ctx.pdcObjects_=()=>{throw Error('SHEETS_MUST_NOT_BLOCK');};
++ const status=f.ctx.pdcSubmissionStatus_({...f.request('s1','u03-01'),phase:'GRADE'});assert.equal(status.state,'SAVED');assert.equal(status.grade.score,0);assert.equal(f.calls(),0);
++});
++test('blank: an orphan existing GRADE is never overwritten or regraded',()=>{const f=pendingBackend();f.answer('s1','u03-05',true);const old={eventId:'s1-grade',payload:{grade:{score:4,status:'incorrect',feedback:'Existing'}}};f.set(f.root+'/events/SYNTHETIC/s1-grade',old);assert.throws(()=>f.ctx.pdcGradeExplicitBlank_(f.request()),/reconciliar/);assert.deepEqual(f.read(f.root+'/events/SYNTHETIC/s1-grade'),old);assert.equal(f.read(f.root+'/backendGrades'),null);assert.equal(f.calls(),0);});
++
++test('actual local write predicates reject browser GRADE and pendingEvent for canonical explicit blank, retaining ordinary automatic contract',()=>{
++ const rules=JSON.parse(fs.readFileSync('public/firebase-rules.json','utf8')).rules.GamificacioPDC.academic.$group;
++ const node=value=>({child:k=>node(value?.[k]),val:()=>value??null,exists:()=>value!==null&&value!==undefined});
++ const auth={token:{role:'student',groupId:'TEST',studentKey:'SYNTHETIC',studentId:'SYNTHETIC',sessionId:'lease-test'}};
++ const grade={eventId:'s1-grade',submissionId:'s1',studentId:'SYNTHETIC',sessionId:'lease-test',activityId:'u03-01',status:'SYNC_PENDING',payload:{grade:{score:10},progress:{score:10},kind:'numeric'}};
++ for(const declared of [false,true]) {const root=node({GamificacioPDC:{activeSessions:{TEST:{SYNTHETIC:{sessionId:'lease-test'}}},academic:{TEST:{events:{SYNTHETIC:{'s1-answer':{payload:{submissionMode:declared?'EXPLICIT_NO_ANSWER':'ANSWER'}}}}}}}});
++ for(const predicate of [rules.events.$student.$eventId['.write'],rules.pendingEvents.$eventId['.write']]){
++  // matches(regex) and native match(regex) have the same truth value here. This is a predicate unit test, not a Rules emulator.
++  const allowed=vm.runInNewContext(predicate.replaceAll('.matches(','.match('),{auth,root,data:node(null),newData:node(grade),$group:'TEST',$student:'SYNTHETIC',$eventId:'s1-grade'});
++  assert.equal(Boolean(allowed),!declared);
++ }}
++});
++test('worker rejects the ordinary-client fallback for a declared blank lacking its backend result',()=>{
++ const f=pendingBackend();f.answer('s1','u03-01',true);const event={eventId:'s1-grade',submissionId:'s1',studentId:'SYNTHETIC',activityId:'u03-01',status:'SYNC_PENDING',createdAt:Date.now(),payload:{kind:'numeric',answer:'',grade:{score:10,status:'correct',feedback:'forged'}}};
++ f.set(f.root+'/pendingEvents/s1-grade',event);let saves=0;f.ctx.pdcConfigValue_=(k,d)=>k==='GRUP_ID'?'TEST':d;f.ctx.pdcSaveProgressFromWorker_=()=>saves++;f.ctx.pdcTeacherProjectionWorker_=()=>{};
++ f.ctx.pdcAcademicSyncWorker_();assert.equal(saves,0);assert.equal(f.read(f.root+'/pendingEvents/s1-grade').status,'SYNC_ERROR');assert.equal(f.read(f.root+'/backendGrades'),null);assert.equal(f.calls(),0);
++});
++
++test('a synced recovered grade retains its audit history without being labelled pending sync',()=>{
++ const f=pendingBackend();f.answer('s1','u03-05',true);f.ctx.pdcGradeExplicitBlank_(f.request());const events=f.read(f.root+'/events');events.SYNTHETIC['s1-grade'].status='SYNCED';
++ const result=api.qualificationCases(events,{SYNTHETIC:f.read(f.root+'/backendGrades/SYNTHETIC')},{SYNTHETIC:{s1:{history:{op:{status:'COMPLETED'}}}}});
++ assert.equal(result.length,1);assert.equal(result[0].state,'GRADE_CONFIRMED');assert.equal(result[0].canPreview,false);assert.equal(result[0].history.length,1);
++});
++
++test('empty editor without explicit confirmation cannot even allocate a normal submission',async()=>{
++ const app=fs.readFileSync('app/PdcApp.tsx','utf8');const snippet=app.slice(app.indexOf('  const submit = async'),app.indexOf('  const submitCorrection = async'));const {code}=await transform(snippet+'\nglobalThis.testSubmit=submit;',{loader:'ts'});
++ for(const kind of ['numeric','choice','match','open','decision','mission','text']){
++  let allocations=0,notice;const ctx={readOnly:false,retryBlocked:false,submitInFlight:{current:false},pendingBlank:{current:false},pendingGradeSubmission:{current:null},activity:{kind},answer:'',procedure:'',mapping:{},ordered:[],attempts:0,serialised:'',preview:false,setSubmissionNotice:n=>notice=n,getPendingSubmission:()=>{allocations++;throw Error('UNCONFIRMED_EMPTY_SUBMISSION');}};
++  vm.runInNewContext(code,ctx);try{await ctx.testSubmit();}catch{}assert.equal(allocations,0,kind);assert.ok(notice?.text);
++ }
++});
+diff --git a/tests/support/pending-backend.mjs b/tests/support/pending-backend.mjs
+new file mode 100644
+index 0000000..92659fb
+--- /dev/null
++++ b/tests/support/pending-backend.mjs
+@@ -0,0 +1,38 @@
++import fs from 'node:fs';
++import vm from 'node:vm';
++import { createHash, randomUUID } from 'node:crypto';
++export function pendingBackend(settings = {}) {
++  const data = {}, props = new Map([['GRUP_ID','TEST']]), cache = new Map();
++  let calls = 0, nested = null, failPatch = false, lostAck = false;
++  const read = path => path.split('/').filter(Boolean).reduce((v,k)=>v?.[k],data) ?? null;
++  const set = (path,value) => { const parts=path.split('/').filter(Boolean); let node=data; for(const k of parts.slice(0,-1)) node=node[k] ||= {}; if(value===null)delete node[parts.at(-1)];else node[parts.at(-1)]=structuredClone(value); };
++  const ctx = vm.createContext({console:{log(){}},DOCENT_SESSION_SECONDS:21600,
++    Utilities:{DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},computeDigest:(_,s)=>[...createHash('sha256').update(s).digest()],base64EncodeWebSafe:b=>Buffer.from(b).toString('base64url'),getUuid:randomUUID},
++    PropertiesService:{getScriptProperties:()=>({getProperty:k=>props.get(k)||null,setProperty:(k,v)=>props.set(k,v),deleteProperty:k=>props.delete(k)})},
++    CacheService:{getScriptCache:()=>({get:k=>cache.get(k),put:(k,v)=>cache.set(k,v),remove:k=>cache.delete(k)})},
++    LockService:{getScriptLock:()=>({waitLock(){},tryLock:()=>true,releaseLock(){}})},
++    UrlFetchApp:{fetch(){throw Error('NETWORK_FORBIDDEN');}},
++  });
++  vm.runInContext(fs.readFileSync('apps-script/Code.gs','utf8'),ctx);
++  ctx.pdcFirebaseAdminGet_=path=>structuredClone(read(path));
++  ctx.pdcFirebaseAdminSet_=set;
++  ctx.pdcFirebaseAdminDelete_=path=>set(path,null);
++  ctx.pdcFirebaseAdminPatch_=(path,changes)=>{if(failPatch){failPatch=false;throw Error('offline');}for(const [key,v] of Object.entries(changes))set(path+'/'+key,v);if(lostAck && 'pendingEvents/s1-grade' in changes){lostAck=false;throw Error('ACK_LOST');}};
++  ctx.pdcOpenAIGrade_=()=>{calls++;if(nested)nested();return{score:6,status:'partial',feedback:'Retorn sintètic',confidence:1,criterionScores:[],teacherReview:false};};
++  ctx.pdcRubricGradeIssues_=()=>[];ctx.pdcApplyPdcCalibration_=(_a,_b,g)=>g;ctx.pdcNormalizeRubricGrade_=(_a,_b,g)=>g;
++  const policy={requireCorrectionAfterFailure:false,secondAttemptWithHint:true,secondAttemptEnabled:true,allowContinueAfterFirst:true,scorePolicy:'SECOND_ATTEMPT',...settings};
++  set('GamificacioPDC/teacherState/TEST',{dashboard:{students:[{id:'SYNTHETIC',name:'Test'}],unitAccess:[{unitId:'u03',enabled:true,closed:false,term:1}],assessmentPlan:{terms:[{term:1,closed:false}],activities:[]},pedagogicalSettings:policy}});
++  props.set(ctx.pdcStudentLeaseKey_('SYNTHETIC','TEST'),'lease-test');
++  props.set(ctx.pdcTeacherSessionKey_('teacher-test'),JSON.stringify({epoch:ctx.pdcResetEpoch_(),expiresAt:Date.now()+600000}));
++  const root='GamificacioPDC/academic/TEST';
++  function answer(id='s1',activityId='u03-05',blank=false,attemptsBefore=0) {
++    const activity=ctx.PDC_ACTIVITY_CATALOG[activityId];
++    const snapshot={id:activity.id,unitId:activity.unitId,kind:activity.kind,prompt:activity.prompt,context:activity.context||'',data:activity.data||[],modelAnswer:activity.modelAnswer,rubric:activity.rubric||[]};
++    const e={eventId:id+'-answer',submissionId:id,studentId:'SYNTHETIC',sessionId:'lease-test',type:'SUBMISSION',unitId:'u03',activityId,sequence:attemptsBefore*2+1,createdAt:1000+attemptsBefore,status:'PROCESSING',payload:{answer:blank?'':'Resposta sintètica original',kind:activity.kind,variant:0,attemptsBefore,attemptNumber:attemptsBefore+1,recoveryContext:{schemaVersion:'PDC_ANSWER_CONTEXT_V1',gradingSchemaVersion:'PDC_OPEN_RUBRIC_V1',activityVersion:ctx.pdcHistoricalReviewHash_(snapshot),activitySnapshot:snapshot,pedagogicalPolicySnapshot:policy,scorePolicySnapshot:policy.scorePolicy,threshold:5,maxAttempts:policy.secondAttemptEnabled?2:1},...(blank?{submissionMode:'EXPLICIT_NO_ANSWER',explicitConfirmation:true}:{})}};
++    set(root+'/events/SYNTHETIC/'+e.eventId,e);return e;
++  }
++  const request=(id='s1',activityId='u03-05')=>({groupId:'TEST',studentId:'SYNTHETIC',sessionId:'lease-test',activityId,submissionId:id});
++  const teacher=(id='s1',activityId='u03-05')=>({...request(id,activityId),teacherToken:'teacher-test'});
++  function prepare(id='s1',activity='u03-05') { const q=teacher(id,activity),preview=ctx.pdcTeacherPendingPreview_(q);return {...q,ticket:preview.ticket,expectedHash:preview.expectedHash,confirmRecovery:true}; }
++  return{ctx,data,read,set,props,cache,root,answer,request,teacher,prepare,calls:()=>calls,duringGrade:fn=>nested=fn,failPatch:()=>failPatch=true,loseAck:()=>lostAck=true};
++}
