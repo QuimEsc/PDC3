@@ -1,0 +1,145 @@
+diff --git a/apps-script/Code.gs b/apps-script/Code.gs
+index ca983c0..3290ba2 100644
+--- a/apps-script/Code.gs
++++ b/apps-script/Code.gs
+@@ -1535,13 +1535,57 @@ function pdcOpenAILowLatencyBody_(body) {
+   return body;
+ }
+ 
++function pdcOpenAIError_(code, message, httpStatus) {
++  var error = new Error(message);
++  error.code = code;
++  error.httpStatus = Number(httpStatus || 0);
++  return error;
++}
++
+ function pdcOpenAIJsonResponse_(response, label) {
++  var httpStatus = response.getResponseCode();
+   var content = response.getContentText() || "";
++  var parsed = null;
+   try {
+-    return JSON.parse(content);
+-  } catch (error) {
+-    throw new Error(label + " no ha retornat una resposta valida.");
++    parsed = JSON.parse(content);
++  } catch (error) { /* Preserve the HTTP cause even for an HTML error page. */ }
++  if (httpStatus < 200 || httpStatus >= 300) {
++    var upstreamCode = parsed && parsed.error && parsed.error.code;
++    var code = httpStatus === 401 ? "OPENAI_AUTH" : httpStatus === 403 ? "OPENAI_ACCESS"
++      : httpStatus === 404 ? "OPENAI_MODEL" : httpStatus === 429
++        ? /^(insufficient_quota|billing_hard_limit_reached)$/.test(upstreamCode || "") ? "OPENAI_BILLING" : "OPENAI_RATE_LIMIT"
++      : httpStatus >= 500 ? "OPENAI_SERVER" : "OPENAI_REQUEST";
++    // Upstream messages may contain credential fragments or request content.
++    throw pdcOpenAIError_(code, label + " no ha pogut completar la peticio (HTTP " + httpStatus + "). La resposta continua guardada.", httpStatus);
++  }
++  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
++    throw pdcOpenAIError_("OPENAI_INVALID_RESPONSE", label + " no ha retornat una resposta valida.", httpStatus);
++  }
++  if (parsed.status === "incomplete") {
++    var tokenLimit = parsed.incomplete_details && parsed.incomplete_details.reason === "max_output_tokens";
++    throw pdcOpenAIError_(tokenLimit ? "OPENAI_INCOMPLETE_MAX_OUTPUT_TOKENS" : "OPENAI_INCOMPLETE",
++      "La comprovacio no s'ha completat. La resposta continua guardada.", httpStatus);
++  }
++  if (parsed.error || (parsed.status && parsed.status !== "completed")) {
++    throw pdcOpenAIError_("OPENAI_RESPONSE_FAILED", "No s'ha pogut completar la comprovacio. La resposta continua guardada.", httpStatus);
+   }
++  return parsed;
++}
++
++function pdcOpenAIOutput_(parsed) {
++  var outputText = "";
++  var refusal = false;
++  if (!Array.isArray(parsed.output)) throw pdcOpenAIError_("OPENAI_INVALID_RESPONSE", "La comprovacio rebuda no es valida.");
++  parsed.output.forEach(function (item) {
++    (Array.isArray(item && item.content) ? item.content : []).forEach(function (content) {
++      if (content && content.type === "refusal") refusal = true;
++      if (content && content.type === "output_text" && typeof content.text === "string") outputText += content.text;
++    });
++  });
++  if (refusal) throw pdcOpenAIError_("OPENAI_REFUSAL", "La resposta necessita una revisio docent.");
++  if (!outputText) throw pdcOpenAIError_("OPENAI_EMPTY_OUTPUT", "No s'ha rebut la comprovacio. La resposta continua guardada.");
++  try { return JSON.parse(outputText); }
++  catch (error) { throw pdcOpenAIError_("OPENAI_INVALID_RESULT_JSON", "La comprovacio rebuda no es valida. La resposta continua guardada."); }
+ }
+ 
+ function pdcOpenAICorrection_(activity, answer) {
+@@ -1596,17 +1640,14 @@ function pdcOpenAICorrection_(activity, answer) {
+     payload: JSON.stringify(body),
+     muteHttpExceptions: true
+   });
+-  var code = response.getResponseCode();
+   var parsed = pdcOpenAIJsonResponse_(response, "OpenAI");
+-  if (code < 200 || code >= 300) throw new Error(parsed.error && parsed.error.message || "OpenAI HTTP " + code);
+-  var outputText = "";
+-  (parsed.output || []).forEach(function (item) {
+-    (item.content || []).forEach(function (content) {
+-      if (content.type === "output_text" && content.text) outputText += content.text;
+-    });
+-  });
+-  if (!outputText) throw new Error("OpenAI no ha retornat la comprovacio.");
+-  return JSON.parse(outputText);
++  var result = pdcOpenAIOutput_(parsed);
++  if (!result || typeof result.passed !== "boolean" || typeof result.feedback !== "string" ||
++      !pdcText_(result.feedback) || typeof result.confidence !== "number" ||
++      !isFinite(result.confidence) || result.confidence < 0 || result.confidence > 1) {
++    throw pdcOpenAIError_("OPENAI_INVALID_CORRECTION", "La comprovacio rebuda no es valida.");
++  }
++  return result;
+ }
+ 
+ function pdcFallbackCorrection_(activity, answer) {
+@@ -2470,16 +2511,9 @@ function pdcOpenAIGrade_(activity, answer, repairContext) {
+     payload: JSON.stringify(body),
+     muteHttpExceptions: true
+   });
+-  var code = response.getResponseCode();
+   var parsed = pdcOpenAIJsonResponse_(response, "OpenAI");
+-  if (code < 200 || code >= 300) throw new Error(parsed.error && parsed.error.message || "OpenAI HTTP " + code);
+-  var outputText = "";
+-  (parsed.output || []).forEach(function (item) {
+-    (item.content || []).forEach(function (content) { if (content.type === "output_text" && content.text) outputText += content.text; });
+-  });
+-  if (!outputText) throw new Error("OpenAI no ha retornat text estructurat.");
+-  var grade = JSON.parse(outputText);
+-  if (typeof grade.score !== "number" || !isFinite(grade.score) || grade.score < 0 || grade.score > 10 ||
++  var grade = pdcOpenAIOutput_(parsed);
++  if (!grade || typeof grade.score !== "number" || !isFinite(grade.score) || grade.score < 0 || grade.score > 10 ||
+       ["correct", "partial", "incorrect", "review"].indexOf(grade.status) < 0 ||
+       typeof grade.feedback !== "string" || !Array.isArray(grade.criterionScores)) {
+     throw new Error("OpenAI ha retornat una qualificacio incompleta.");
+@@ -2555,6 +2589,17 @@ function pdcHistoricalReviewHash_(value) {
+     .map(function (byte) { return ("0" + (byte & 255).toString(16)).slice(-2); }).join("");
+ }
+ 
++/** RTDB object-key order is not part of the immutable academic content. */
++function pdcRecoveryContextJson_(value) {
++  if (Array.isArray(value)) return "[" + value.map(pdcRecoveryContextJson_).join(",") + "]";
++  if (value && typeof value === "object") {
++    return "{" + Object.keys(value).sort().map(function (key) {
++      return JSON.stringify(key) + ":" + pdcRecoveryContextJson_(value[key]);
++    }).join(",") + "}";
++  }
++  return JSON.stringify(value);
++}
++
+ /** New immutable ANSWER contexts may be retried only under the original contract. */
+ function pdcValidateAnswerRecoveryContext_(answer, activity, settings, maxAttempts) {
+   var context = answer.payload && answer.payload.recoveryContext;
+@@ -2562,9 +2607,16 @@ function pdcValidateAnswerRecoveryContext_(answer, activity, settings, maxAttemp
+   var snapshot = { id: activity.id, unitId: activity.unitId, kind: activity.kind, prompt: activity.prompt,
+     context: activity.context || "", data: activity.data || [], modelAnswer: activity.modelAnswer,
+     rubric: activity.rubric || [] };
++  var storedSnapshot = context.activitySnapshot;
++  if (storedSnapshot && typeof storedSnapshot === "object" && !Array.isArray(storedSnapshot)) {
++    storedSnapshot = Object.assign({}, storedSnapshot);
++    // RTDB does not retain empty arrays. Restore only these known optional lists.
++    if (storedSnapshot.data === undefined) storedSnapshot.data = [];
++    if (storedSnapshot.rubric === undefined) storedSnapshot.rubric = [];
++  }
+   if (context.schemaVersion !== "PDC_ANSWER_CONTEXT_V1" || context.gradingSchemaVersion !== "PDC_OPEN_RUBRIC_V1" ||
+       context.activityVersion !== pdcHistoricalReviewHash_(snapshot) ||
+-      pdcHistoricalReviewHash_(context.activitySnapshot) !== context.activityVersion ||
++      pdcRecoveryContextJson_(storedSnapshot) !== pdcRecoveryContextJson_(snapshot) ||
+       JSON.stringify(pdcNormalizePedagogicalSettings_(context.pedagogicalPolicySnapshot)) !== JSON.stringify(pdcNormalizePedagogicalSettings_(settings)) ||
+       context.scorePolicySnapshot !== settings.scorePolicy || Number(context.threshold) !== 5 ||
+       Number(context.maxAttempts) !== maxAttempts || Number(answer.payload.attemptNumber) !== Number(answer.payload.attemptsBefore || 0) + 1) {

@@ -1,0 +1,10 @@
+{
+  "productionPagesCommit": "e23c7b9a11e6ea5b2b96b09565b2f8957dafa311",
+  "productionAppsScriptVersion": 27,
+  "productionBackendBaselineSha256LF": "e03d8025229b6af66a0e7dfbb51b48fc2e2db90bb8aa59b937bde6e3923d0ac2",
+  "candidateBackendSha256LF": "26b015d7679d5eae138948c8d59ecec45ae142fc960beb302fb981756322446f",
+  "frontendChanges": false,
+  "modelChanges": false,
+  "configurationTemplatesOnly": true,
+  "deploymentAuthorized": false
+}

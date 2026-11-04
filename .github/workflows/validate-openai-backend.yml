@@ -1,0 +1,39 @@
+name: Validate OpenAI backend
+
+on:
+  pull_request:
+    paths:
+      - 'apps-script/**'
+      - 'APPSCRIPT/**'
+      - 'scripts/verify-openai.mjs'
+      - 'tests/open*.test.mjs'
+      - '.github/workflows/validate-openai-backend.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate contract without credentials or external API calls
+        run: node --test tests/openai-context-rtdb.test.mjs tests/openai-integration.test.mjs tests/open-grading-firebase.test.mjs
+      - name: Check backend copies and credential-free templates
+        run: |
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          assert.ok(fs.readFileSync('apps-script/Code.gs').equals(fs.readFileSync('APPSCRIPT/Code.gs')));
+          for (const file of ['apps-script/Configuracio.gs', 'APPSCRIPT/Configuracio.gs']) {
+            const text = fs.readFileSync(file, 'utf8');
+            assert.ok(text.includes('POSA_ACI_LA_CLAU_OPENAI'));
+            assert.ok(!/sk-[A-Za-z0-9_-]{20,}/.test(text));
+          }
+          NODE
