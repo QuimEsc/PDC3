@@ -314,8 +314,13 @@
       "rubrics": {
         "$group": {
           ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
-          ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+          "levelScale": { ".write": false },
+          "catalog": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
+          "assessments": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
+          "pending": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
+          "deletedAssessments": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
           "ratings": {
+            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
             "$assessmentId": {
               ".validate": "!root.child('GamificacioPDC').child('rubrics').child($group).child('deletedAssessments').child($assessmentId).exists()"
             }

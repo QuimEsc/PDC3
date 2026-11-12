@@ -1,0 +1,33 @@
+name: Validate teacher rubric level scale
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app/TeacherRubrics.tsx'
+      - 'lib/rubric*.ts'
+      - 'lib/teacher-rubric-scale-preview.ts'
+      - 'apps-script/Code.gs'
+      - 'APPSCRIPT/Code.gs'
+      - '**/firebase-rules.json'
+      - 'firebase-rules.json'
+      - 'release/teacher-rubric-level-scale.*'
+      - 'tests/rubric-backend.test.mjs'
+      - 'tests/teacher-rubric-scale-public.test.mjs'
+      - 'tests/support/pending-backend.mjs'
+      - '.github/workflows/validate-teacher-rubric-scale.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rubric-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test tests/teacher-rubric-scale-public.test.mjs tests/rubric-backend.test.mjs

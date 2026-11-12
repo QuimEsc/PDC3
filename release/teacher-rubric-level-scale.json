@@ -1,0 +1,42 @@
+{
+  "sourceCommit": "5588d80390f40c5c60c8dff41011d54babee290d",
+  "basePublicCommit": "065410396ba566e295f9e32c6bc1e5b229cb22e0",
+  "referencePatch": {
+    "path": "release/teacher-rubric-level-scale.patch",
+    "sha256": "fca0a2d6e5c3e05aac6b6433a5673aa773b61d398328822870cb23cf31af6354",
+    "paths": [
+      "APPSCRIPT/Code.gs",
+      "PUJAR_A_GITHUB/firebase-rules.json",
+      "app/TeacherRubrics.tsx",
+      "apps-script/Code.gs",
+      "docs/TEACHER_RUBRIC_LEVEL_SCALE.md",
+      "lib/rubric-service.ts",
+      "lib/rubrics.ts",
+      "lib/teacher-rubric-scale-preview.ts",
+      "public/firebase-rules.json",
+      "tests/predeploy-emulator.test.mjs",
+      "tests/rubric-backend.test.mjs",
+      "tests/rubrics.test.mjs",
+      "tests/support/firebase-memory.mjs",
+      "tests/support/predeploy/entry.tsx",
+      "tests/support/predeploy/rig.mjs",
+      "tests/teacher-rubric-scale.test.mjs"
+    ]
+  },
+  "files": {
+    "APPSCRIPT/Code.gs": "b8c5efd2e876f0e17d3b1588452158346725f56935155e44ac99e50fa8f12124",
+    "apps-script/Code.gs": "b8c5efd2e876f0e17d3b1588452158346725f56935155e44ac99e50fa8f12124",
+    "PUJAR_A_GITHUB/firebase-rules.json": "8149c15e96cc774e852f195e1e445c20b521defc4b290e68e5aaa3c23f9bb18b",
+    "public/firebase-rules.json": "8149c15e96cc774e852f195e1e445c20b521defc4b290e68e5aaa3c23f9bb18b",
+    "app/TeacherRubrics.tsx": "ebc72dcbc68cbf97f912cad79e1ec76cabcb9a3a0cc0fe71a9b2a8962ed6e3c5",
+    "lib/rubrics.ts": "d3d2f4225429eb55e63c24dfadeb53a846c0d29318b2e914a8990fcf5786a61b",
+    "lib/rubric-service.ts": "8aac097d736771c5239270d8d7e4f94228b6cb86715d483337bb73d422f4a6f5",
+    "lib/teacher-rubric-scale-preview.ts": "f26f08609e02272968695e8c4133611f8ff98cf9ea6cdfc27e7d2f59e966df78",
+    "docs/TEACHER_RUBRIC_LEVEL_SCALE.md": "cce05cf13474575975db12a23cea959394fa8e5d45aa62529d5ffb67e11203d7",
+    "tests/rubric-backend.test.mjs": "d31eae2d1cea641c27d79797cbefbe3631c6d2bbf83882d9e310356389bbc37a",
+    "tests/support/pending-backend.mjs": "3ae60edeec89267b6a8d5ca305ab4139123e2a594f3baca320e6c5c15a683666",
+    "firebase-rules.json": "8149c15e96cc774e852f195e1e445c20b521defc4b290e68e5aaa3c23f9bb18b",
+    ".github/workflows/validate-teacher-rubric-scale.yml": "71e102bb6932441232b4ebac6a46aa1b60e6c7fec07a368b94165c32def1b0a0",
+    "tests/teacher-rubric-scale-public.test.mjs": "af86b04ad49103b8d1002656e4fb51f40c82275f8640126bcae5b4648c777f26"
+  }
+}
