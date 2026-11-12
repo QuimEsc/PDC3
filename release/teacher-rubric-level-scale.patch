@@ -1,0 +1,907 @@
+diff --git a/APPSCRIPT/Code.gs b/APPSCRIPT/Code.gs
+index 41ca2967764621489b5194ab63b6b50fc4dc4b3e..8f1f2ce04b4719546a184ec2b229ba42878ccac3 100644
+--- a/APPSCRIPT/Code.gs
++++ b/APPSCRIPT/Code.gs
+@@ -92,6 +92,7 @@ var PDC_TEACHER_ACTIONS = [
+   "teacher_save_observation", "teacher_approve_correction", "teacher_add_participation",
+   "battle_prepare", "battle_finalize", "battle_history",
+   "teacher_class_start", "teacher_class_end", "teacher_session_decision",
++  "teacher_save_rubric_level_scale",
+   "teacher_set_pedagogical_settings", "teacher_set_unit_grading_policy", "teacher_sync_rubrics"
+ ];
+ var PDC_STUDENT_SESSION_ACTIONS = [
+@@ -151,6 +152,7 @@ function doPost(e) {
+       case "teacher_check": result = { authorized: true }; break;
+       case "teacher_dashboard": result = pdcTeacherDashboard_(); break;
+       case "teacher_technical_incidents": result = pdcTeacherTechnicalIncidents_(); break;
++      case "teacher_save_rubric_level_scale": result = pdcSaveTeacherRubricLevelScale_(data); break;
+       case "teacher_sync_rubrics": result = pdcTeacherSyncRubrics_(); break;
+       case "teacher_apply_historical_review": result = pdcApplyHistoricalReview_(data); break;
+       case "teacher_set_pedagogical_settings": result = pdcTeacherSetPedagogicalSettings_(data); break;
+@@ -5294,6 +5296,37 @@ function pdcProjectRubrics_() {
+   });
+ }
+ 
++/** Save the teacher rubric scale independently of curricular grading and Sheets projection. */
++function pdcSaveTeacherRubricLevelScale_(data) {
++  var group = pdcOpenGradeGroup_(data.groupId);
++  var scores = data.scores;
++  var levels = ["MOLT_CONSOLIDAT", "CONSOLIDAT", "EN_PROCES", "INICIAL"];
++  if (!scores || typeof scores !== "object" || Object.keys(scores).length !== levels.length ||
++      !levels.every(function(level, index) {
++        var value = scores[level];
++        return typeof value === "number" && isFinite(value) && value >= 0 && value <= 10 &&
++          (index === 0 || scores[levels[index - 1]] > value);
++      })) throw new Error("Introduïx quatre valors estrictament descendents entre 0 i 10.");
++  if (!Number.isSafeInteger(data.expectedRevision) || data.expectedRevision < 0) throw new Error("Revisió d’escala no vàlida.");
++  var path = pdcFirebaseRootPath_("rubrics", group) + "/levelScale";
++  var lock = LockService.getScriptLock();
++  lock.waitLock(10000);
++  try {
++    var current = pdcFirebaseAdminGet_(path);
++    var revision = current ? current.revision : 0;
++    if (current && (revision === data.expectedRevision || revision === data.expectedRevision + 1) &&
++        levels.every(function(level) { return current.scores[level] === scores[level]; })) {
++      return { scale: { revision: revision, scores: current.scores } };
++    }
++    if (revision !== data.expectedRevision) throw new Error("L’escala ha canviat. Recarrega-la abans de guardar.");
++    var next = { revision: revision + 1, scores: scores };
++    var history = current ? current.history || {} : {};
++    history["v" + next.revision] = { scores: scores, updatedAt: new Date().toISOString() };
++    pdcFirebaseAdminSet_(path, { revision: next.revision, scores: scores, history: history });
++    return { scale: next };
++  } finally { lock.releaseLock(); }
++}
++
+ /** Explicit teacher-only refresh from permanent Sheets. Pending writes must drain first. */
+ function pdcTeacherSyncRubrics_() {
+   var group = pdcConfigValue_("GRUP_ID", "PDC3");
+diff --git a/PUJAR_A_GITHUB/firebase-rules.json b/PUJAR_A_GITHUB/firebase-rules.json
+index aba917950be52804319f6184b35e69eb17e40105..55267d98377092ebd354625f3bd48d71bc8ea953 100644
+--- a/PUJAR_A_GITHUB/firebase-rules.json
++++ b/PUJAR_A_GITHUB/firebase-rules.json
+@@ -314,8 +314,13 @@
+       "rubrics": {
+         "$group": {
+           ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+-          ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
++          "levelScale": { ".write": false },
++          "catalog": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
++          "assessments": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
++          "pending": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
++          "deletedAssessments": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
+           "ratings": {
++            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+             "$assessmentId": {
+               ".validate": "!root.child('GamificacioPDC').child('rubrics').child($group).child('deletedAssessments').child($assessmentId).exists()"
+             }
+diff --git a/app/TeacherRubrics.tsx b/app/TeacherRubrics.tsx
+index 023e0694c7855942d2ac00140ce056e60df9a55d..d34a249c09a5b98c0ffdcec64ecb780eb3d8afc7 100644
+--- a/app/TeacherRubrics.tsx
++++ b/app/TeacherRubrics.tsx
+@@ -1,23 +1,28 @@
+ "use client";
+-/* eslint-disable @typescript-eslint/no-explicit-any */
+-import { useEffect, useMemo, useState } from "react";
++import { useEffect, useMemo, useRef, useState } from "react";
+ import { apiCall } from "../lib/services";
+ import { publicAsset } from "../lib/public-asset";
+ import { evaluationCriteria } from "../lib/curricular-alignment";
+-import { applyRubric, deleteRubricApplication, listRubrics, readRubricData, saveRubric, saveRubricRating, subscribeRubrics, updateRubricApplication, type RubricData } from "../lib/rubric-service";
+-import { createRubric, nextRubricLevel, parseRubricCsv, rubricRows, rubricScore, rubricTopicLabel,
+-  RUBRIC_EVIDENCE_TYPES, RUBRIC_LABELS, RUBRIC_LEVELS, RUBRIC_TOPICS,
+-  type RatingLevel, type RubricAssessment, type RubricImportRow, type RubricLevel, type RubricTemplate } from "../lib/rubrics";
++import { applyRubric, deleteRubricApplication, listRubrics, readRubricData, saveRubric, saveRubricRating, saveTeacherRubricScale, subscribeRubrics, updateRubricApplication, type RubricData } from "../lib/rubric-service";
++import { createRubric, effectiveTeacherRubricScale, nextRubricLevel, parseRubricCsv, rubricRows, rubricScore, rubricTopicLabel,
++  RUBRIC_EVIDENCE_TYPES, RUBRIC_LABELS, RUBRIC_LEVELS, RUBRIC_TOPICS, SCORED_RUBRIC_LEVELS, teacherRubricLevelScore,
++  type RatingLevel, type RubricAssessment, type RubricImportRow, type RubricLevel, type RubricLevelScores, type RubricTemplate } from "../lib/rubrics";
+ 
+ const blankDescriptors = () => Object.fromEntries(RUBRIC_LEVELS.map((level) => [level, ""])) as Record<RubricLevel, string>;
+ const blankRow = (): RubricImportRow => ({ indicator: "", criterion: "", descriptors: blankDescriptors() });
+ const initialData = (): RubricData => ({ catalog: {}, assessments: {}, ratings: {} });
++type ScaleDraft = { revision: number; fields: Record<string, string> };
+ type Student = { id: string; name: string };
+ const key = (assessmentId: string, studentId: string, indicatorId: string) => `${assessmentId}:${studentId}:${indicatorId}`;
+ const groupId = () => window.PDC_CONFIG?.groupId || "PDC3";
+ 
+ export function TeacherRubrics({ students }: { students: Student[] }) {
+   const [data, setData] = useState<RubricData>(initialData);
++  const [dataReady, setDataReady] = useState(false);
++  const [scaleDraft, setScaleDraft] = useState<ScaleDraft | null>(null);
++  const [scaleSaving, setScaleSaving] = useState(false);
++  const scaleInFlight = useRef(false);
++  const [scaleNotice, setScaleNotice] = useState("");
+   const [filter, setFilter] = useState("ALL");
+   const [search, setSearch] = useState("");
+   const [message, setMessage] = useState("");
+@@ -38,8 +43,44 @@ export function TeacherRubrics({ students }: { students: Student[] }) {
+   const [activeIndicator, setActiveIndicator] = useState("");
+   const [overrides, setOverrides] = useState<Record<string, RubricLevel>>({});
+   const [saving, setSaving] = useState<Record<string, string>>({});
+-  useEffect(() => subscribeRubrics(setData), []);
+-  useEffect(() => { void readRubricData().then(setData).catch(() => setMessage("No s’ha pogut carregar la biblioteca.")); }, []);
++  useEffect(() => {
++    let active = true;
++    const accept = (next: RubricData) => {
++      if (!active) return;
++      setData(previous => (previous.levelScale?.revision ?? 0) > (next.levelScale?.revision ?? 0)
++        ? { ...next, levelScale: previous.levelScale } : next);
++      setDataReady(true);
++    };
++    const unsubscribe = subscribeRubrics(accept);
++    void readRubricData().then(accept).catch(() => { if (active) setMessage("No s’ha pogut carregar la biblioteca."); });
++    return () => { active = false; unsubscribe(); };
++  }, []);
++  const scale = effectiveTeacherRubricScale(data.levelScale);
++  const scoreLabel = (level: RatingLevel) => {
++    const value = teacherRubricLevelScore(level, scale.scores);
++    return value === null ? "" : ` · ${String(value).replace(".", ",")}/10`;
++  };
++  const saveScale = async () => {
++    if (!scaleDraft || scaleInFlight.current) return;
++    scaleInFlight.current = true;
++    setScaleSaving(true);
++    setScaleNotice("");
++    try {
++      const scores = Object.fromEntries(SCORED_RUBRIC_LEVELS.map(level => {
++        const value = scaleDraft.fields[level].trim();
++        return [level, value === "" ? NaN : Number(value)];
++      })) as RubricLevelScores;
++      const saved = await saveTeacherRubricScale(scores, scaleDraft.revision);
++      setData(previous => (previous.levelScale?.revision ?? 0) > saved.revision ? previous : { ...previous, levelScale: saved });
++      setScaleDraft(null);
++      setScaleNotice("Escala guardada.");
++    } catch (error) {
++      setScaleNotice(error instanceof Error ? error.message : "No s’ha pogut confirmar el guardat.");
++    } finally {
++      scaleInFlight.current = false;
++      setScaleSaving(false);
++    }
++  };
+   const templates = useMemo(() => listRubrics(data).filter((item) =>
+     (filter === "ALL" || item.topic === filter) && item.name.toLocaleLowerCase("ca").includes(search.toLocaleLowerCase("ca"))), [data, filter, search]);
+   const current = assessment && (data.assessments[assessment.assessmentId] || assessment);
+@@ -51,7 +92,7 @@ export function TeacherRubrics({ students }: { students: Student[] }) {
+   const ratingsFor = (student: string) => Object.fromEntries((current?.snapshot.indicators || []).map((indicator) => {
+     const level = levelFor(student, indicator.indicatorId);
+     return [indicator.indicatorId, level === "UNRATED" ? undefined : { levelId: level }];
+-  })) as any;
++  }));
+   const choose = (student: string, indicator: string, level: RubricLevel) => {
+     if (!current) return;
+     const id = key(current.assessmentId, student, indicator);
+@@ -127,6 +168,32 @@ export function TeacherRubrics({ students }: { students: Student[] }) {
+       <a className="rubric-template-link" href={publicAsset("/plantilla-rubrica-pdc3.xlsx")} download="plantilla-rubrica-pdc3.xlsx">↓ Descarregar plantilla .xlsx</a>
+       <button onClick={() => void apiCall("teacher_sync_rubrics").then(() => readRubricData().then(setData)).then(() => setMessage("Biblioteca actualitzada en Firebase.")).catch(() => setMessage("No s’ha pogut sincronitzar la biblioteca."))}>Actualitzar rúbriques en Firebase</button>
+     </div>
++    <section className="rubric-editor">
++      <h2>Configuració dels nivells</h2>
++      <p>L’escala s’aplica a totes les rúbriques del grup i a les valoracions existents. Les qualificacions curriculars vigents requerixen una revisió separada.</p>
++      <form onSubmit={event => { event.preventDefault(); void saveScale(); }}>
++        <table>
++          <thead><tr><th scope="col">Nivell</th><th scope="col">Puntuació sobre 10</th></tr></thead>
++          <tbody>{SCORED_RUBRIC_LEVELS.map(level => <tr key={level}>
++            <th scope="row">{RUBRIC_LABELS[level]}</th>
++            <td>{scaleDraft ? <input type="number" aria-label={RUBRIC_LABELS[level]} required min={0} max={10} step="any"
++              value={scaleDraft.fields[level]} disabled={scaleSaving}
++              onChange={event => { const value = event.target.value; setScaleDraft(draft => draft &&
++                { ...draft, fields: { ...draft.fields, [level]: value } }); }} /> : String(scale.scores[level]).replace(".", ",")}</td>
++          </tr>)}</tbody>
++        </table>
++        <p>Sense informació suficient · No computa</p>
++        <div className="rubric-toolbar">{scaleDraft ? <>
++          <button type="submit" className="primary-button" disabled={scaleSaving}>Guardar canvis</button>
++          <button type="button" disabled={scaleSaving} onClick={() => { setScaleDraft(null); setScaleNotice(""); }}>Cancel·lar</button>
++        </> : <button type="button" disabled={!dataReady} onClick={event => {
++          event.preventDefault();
++          setScaleNotice("");
++          setScaleDraft({ revision: scale.revision, fields: Object.fromEntries(SCORED_RUBRIC_LEVELS.map(level => [level, String(scale.scores[level])])) });
++        }}>Editar puntuacions</button>}</div>
++      </form>
++      {scaleNotice && <p role="status">{scaleNotice}</p>}
++    </section>
+     {current ? <div className="rubric-capture">
+       <div className="rubric-toolbar"><button onClick={() => setAssessment(null)}>← Biblioteca</button><h2>{current.applicationName || current.snapshot.name}</h2><span>{current.rubricNameSnapshot || current.snapshot.name} · {new Date(current.date).toLocaleDateString("ca-ES")} · v{current.rubricVersion}</span>
+         <button onClick={() => { setApplicationName(current.applicationName || current.snapshot.name); setApplicationDate(current.date.slice(0, 10)); setApplicationContext(current.context || ""); setEditingApplication(true); }}>Editar aplicació</button>
+@@ -138,19 +205,19 @@ export function TeacherRubrics({ students }: { students: Student[] }) {
+         <label>Context/observació <input value={applicationContext} onChange={(event) => setApplicationContext(event.target.value)} /></label>
+         <button onClick={() => void editApplication()}>Guardar canvis</button><button onClick={() => setEditingApplication(false)}>Cancel·lar</button></div>}
+       {mode === "student" ? <><label>Alumne <select value={studentId} onChange={(event) => setStudentId(event.target.value)}>{students.map((student) => <option key={student.id} value={student.id}>{student.name}</option>)}</select></label>
+-        <p>Nota de la rúbrica: {rubricScore(current.snapshot.indicators, ratingsFor(studentId))?.toFixed(1) ?? "Sense informació"}</p>
++        <p>Nota de la rúbrica: {rubricScore(current.snapshot.indicators, ratingsFor(studentId), scale.scores)?.toFixed(1) ?? "Sense informació"}</p>
+         {current.snapshot.indicators.map((indicator) => <article className="rubric-indicator" key={indicator.indicatorId}>
+           <h3>{indicator.name}</h3><small>{indicator.criteria.join(" · ")}</small>
+           <div className="rubric-descriptors">{RUBRIC_LEVELS.map((level) => <button key={level} className={levelFor(studentId, indicator.indicatorId) === level ? `selected rubric-${level}` : ""}
+-            onClick={() => choose(studentId, indicator.indicatorId, level)}><strong>{RUBRIC_LABELS[level]}</strong><span>{indicator.descriptors[level]}</span></button>)}</div>
++            onClick={() => choose(studentId, indicator.indicatorId, level)}><strong>{RUBRIC_LABELS[level]}{scoreLabel(level)}</strong><span>{indicator.descriptors[level]}</span></button>)}</div>
+           <small>{saving[key(current.assessmentId, studentId, indicator.indicatorId)] || ""}</small>
+         </article>)}</> : <>
+         <label>Indicador actiu <select value={activeIndicator} onChange={(event) => setActiveIndicator(event.target.value)}>{current.snapshot.indicators.map((indicator) => <option key={indicator.indicatorId} value={indicator.indicatorId}>{indicator.name}</option>)}</select></label>
+         <div className="rubric-group-grid">{students.map((student) => {
+           const level = levelFor(student.id, activeIndicator);
+           return <button key={student.id} className={`rubric-student-card rubric-${level}`} onClick={() => choose(student.id, activeIndicator, nextRubricLevel(level))}>
+-            <strong>{student.name}</strong><span>{RUBRIC_LABELS[level]}</span>
+-            <span className="rubric-mini">{current.snapshot.indicators.map((indicator) => <i title={`${indicator.name}: ${RUBRIC_LABELS[levelFor(student.id, indicator.indicatorId)]}`} key={indicator.indicatorId}
++            <strong>{student.name}</strong><span>{RUBRIC_LABELS[level]}{scoreLabel(level)}</span>
++            <span className="rubric-mini">{current.snapshot.indicators.map((indicator) => <i title={`${indicator.name}: ${RUBRIC_LABELS[levelFor(student.id, indicator.indicatorId)]}${scoreLabel(levelFor(student.id, indicator.indicatorId))}`} key={indicator.indicatorId}
+               className={`rubric-${levelFor(student.id, indicator.indicatorId)} ${activeIndicator === indicator.indicatorId ? "active" : ""}`} />)}</span>
+             <small>{saving[key(current.assessmentId, student.id, activeIndicator)] || ""}</small>
+           </button>;
+@@ -170,7 +237,7 @@ export function TeacherRubrics({ students }: { students: Student[] }) {
+         {rows.map((row, index) => <div className="rubric-edit-row" key={index}>
+           <label>Indicador <input value={row.indicator} onChange={(event) => setRow(index, { indicator: event.target.value })} /></label>
+           <label>Criteri <select value={row.criterion} onChange={(event) => setRow(index, { criterion: event.target.value })}><option value="">Tria el criteri</option>{Object.values(evaluationCriteria).map((criterion) => <option key={criterion.id} value={criterion.id}>{criterion.id} · {criterion.short}</option>)}</select></label>
+-          {RUBRIC_LEVELS.map((level) => <label key={level}>{RUBRIC_LABELS[level]} <textarea value={row.descriptors[level]} onChange={(event) => setRow(index, { descriptors: { ...row.descriptors, [level]: event.target.value } })} /></label>)}
++          {RUBRIC_LEVELS.map((level) => <label key={level}>{RUBRIC_LABELS[level]}{scoreLabel(level)} <textarea value={row.descriptors[level]} onChange={(event) => setRow(index, { descriptors: { ...row.descriptors, [level]: event.target.value } })} /></label>)}
+           <button onClick={() => setRows((old) => [...old.slice(0, index + 1), { ...row, criterion: "", descriptors: { ...row.descriptors } }, ...old.slice(index + 1)])}>Duplicar indicador per a un altre criteri</button>
+           <button onClick={() => setRows((old) => old.filter((_, i) => i !== index))}>Lleva fila</button>
+         </div>)}
+diff --git a/apps-script/Code.gs b/apps-script/Code.gs
+index 41ca2967764621489b5194ab63b6b50fc4dc4b3e..8f1f2ce04b4719546a184ec2b229ba42878ccac3 100644
+--- a/apps-script/Code.gs
++++ b/apps-script/Code.gs
+@@ -92,6 +92,7 @@ var PDC_TEACHER_ACTIONS = [
+   "teacher_save_observation", "teacher_approve_correction", "teacher_add_participation",
+   "battle_prepare", "battle_finalize", "battle_history",
+   "teacher_class_start", "teacher_class_end", "teacher_session_decision",
++  "teacher_save_rubric_level_scale",
+   "teacher_set_pedagogical_settings", "teacher_set_unit_grading_policy", "teacher_sync_rubrics"
+ ];
+ var PDC_STUDENT_SESSION_ACTIONS = [
+@@ -151,6 +152,7 @@ function doPost(e) {
+       case "teacher_check": result = { authorized: true }; break;
+       case "teacher_dashboard": result = pdcTeacherDashboard_(); break;
+       case "teacher_technical_incidents": result = pdcTeacherTechnicalIncidents_(); break;
++      case "teacher_save_rubric_level_scale": result = pdcSaveTeacherRubricLevelScale_(data); break;
+       case "teacher_sync_rubrics": result = pdcTeacherSyncRubrics_(); break;
+       case "teacher_apply_historical_review": result = pdcApplyHistoricalReview_(data); break;
+       case "teacher_set_pedagogical_settings": result = pdcTeacherSetPedagogicalSettings_(data); break;
+@@ -5294,6 +5296,37 @@ function pdcProjectRubrics_() {
+   });
+ }
+ 
++/** Save the teacher rubric scale independently of curricular grading and Sheets projection. */
++function pdcSaveTeacherRubricLevelScale_(data) {
++  var group = pdcOpenGradeGroup_(data.groupId);
++  var scores = data.scores;
++  var levels = ["MOLT_CONSOLIDAT", "CONSOLIDAT", "EN_PROCES", "INICIAL"];
++  if (!scores || typeof scores !== "object" || Object.keys(scores).length !== levels.length ||
++      !levels.every(function(level, index) {
++        var value = scores[level];
++        return typeof value === "number" && isFinite(value) && value >= 0 && value <= 10 &&
++          (index === 0 || scores[levels[index - 1]] > value);
++      })) throw new Error("Introduïx quatre valors estrictament descendents entre 0 i 10.");
++  if (!Number.isSafeInteger(data.expectedRevision) || data.expectedRevision < 0) throw new Error("Revisió d’escala no vàlida.");
++  var path = pdcFirebaseRootPath_("rubrics", group) + "/levelScale";
++  var lock = LockService.getScriptLock();
++  lock.waitLock(10000);
++  try {
++    var current = pdcFirebaseAdminGet_(path);
++    var revision = current ? current.revision : 0;
++    if (current && (revision === data.expectedRevision || revision === data.expectedRevision + 1) &&
++        levels.every(function(level) { return current.scores[level] === scores[level]; })) {
++      return { scale: { revision: revision, scores: current.scores } };
++    }
++    if (revision !== data.expectedRevision) throw new Error("L’escala ha canviat. Recarrega-la abans de guardar.");
++    var next = { revision: revision + 1, scores: scores };
++    var history = current ? current.history || {} : {};
++    history["v" + next.revision] = { scores: scores, updatedAt: new Date().toISOString() };
++    pdcFirebaseAdminSet_(path, { revision: next.revision, scores: scores, history: history });
++    return { scale: next };
++  } finally { lock.releaseLock(); }
++}
++
+ /** Explicit teacher-only refresh from permanent Sheets. Pending writes must drain first. */
+ function pdcTeacherSyncRubrics_() {
+   var group = pdcConfigValue_("GRUP_ID", "PDC3");
+diff --git a/docs/TEACHER_RUBRIC_LEVEL_SCALE.md b/docs/TEACHER_RUBRIC_LEVEL_SCALE.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..fca545fe7e4e6515432f41dfd834ac50eeaba9a1
+--- /dev/null
++++ b/docs/TEACHER_RUBRIC_LEVEL_SCALE.md
+@@ -0,0 +1,31 @@
++# Escala de rúbriques docents
++
++## Abast i persistència
++
++- **Seguiment docent → Rúbriques → Configuració dels nivells.** L'escala inicial és 10, 7, 4 i 1. El guardat admet decimals entre 0 i 10 en ordre estrictament descendent. «Sense informació suficient» no computa. «Sense valorar» continua sent l'absència de selecció.
++- El registre autoritatiu és `rubrics/<grup>/levelScale` en Firebase. Apps Script usa la sessió docent existent, valida el grup i la revisió esperada, i guarda en una sola escriptura els valors i l'historial versionat amb data. Un guardat concurrent obsolet es rebutja. Reprendre el mateix guardat amb resposta perduda recupera la revisió ja confirmada. Els navegadors del mateix grup poden llegir el registre quan tenen rol docent.
++- La puntuació efectiva es calcula per `levelId` en el moment de llegir-la. Una plantilla antiga importada, una versió actual i una aplicació començada comparteixen l'escala del grup, tant per alumne com per grup. Descriptors, snapshots, criteris, seleccions i IDs queden preservats. La mitjana de les quatre seleccions antigues passa de 6,25 a 5,5.
++- Sheets continua projectant versions, aplicacions i identificadors de nivell en `BibliotecaRubriques`, `RubricaAplicacions` i `RubricaValoracions`. L'escala queda en Firebase. El format de la plantilla XLSX continua basat en descriptors.
++- L'únic punt que genera evidència curricular d'aquestes rúbriques és `rubricOperationalEvidence`, llegit pel servei docent. El candidat manté la seua escala curricular de referència fins a una autorització acadèmica separada. Els correctors de les activitats ordinàries, el catàleg, els prompts, els pesos i el motor curricular conserven el codi anterior. L'única incorporació a Apps Script és la ruta docent de guardat d'escala.
++
++## Simulació i procediment de recalculació
++
++`previewTeacherRubricScale` treballa sobre un snapshot del grup i el seu pla de tancament. Retorna el recompte de rúbriques, aplicacions, valoracions identificables, ambigües i aplicacions òrfenes. Per alumne i aplicació mostra el nivell, la nota original, la proposta, la diferència i les mitjanes. La proposta es compara amb l'escala curricular que usa actualment la projecció. `previewTeacherRubricCurricularImpact` executa el motor existent sobre la mateixa entrada abans i després, substituint només la puntuació d'evidències docents ja presents i inequívocament identificades. Conserva els IDs i permet detectar el canvi en cada àmbit.
++
++1. Abans d'una actuació autoritzada, obtenir en lectura un snapshot coherent de catàleg, aplicacions, revisions de valoracions, escala, tancaments, evidències i qualificacions. Guardar una còpia i la seua empremta fora de Git. La xifra actual de registres de producció queda pendent d'eixe inventari. En aquesta intervenció la simulació s'ha provat amb dades sintètiques.
++2. Comparar la proposta per IDs i revisions. Separar aplicacions actives, notes consolidades pendents de revisió docent, períodes o aplicacions tancats, files òrfenes i notes només numèriques. Les tancades es mantenen en la projecció de referència. Una rúbrica global també queda protegida en el pla quan hi ha un període o unitat tancats, perquè pot alimentar eixos resums.
++3. Presentar la diferència abans/després, l'abast i els conflictes per autorització expressa. La simulació és pura i repetible. El candidat no inclou una ruta de confirmació acadèmica ni un script que escriga les propostes.
++4. En una fase posterior autoritzada, publicar la revisió de projecció curricular aprovada amb el mateix ID de cada evidència. Revalidar revisions i tancaments abans de confirmar-la. Registrar originals i proposta, mantindre els casos exclosos en la versió anterior i aturar-se davant un conflicte. L'adopció acadèmica requerix preparar la persistència d'eixa revisió aprovada en una actuació separada. Els nivells, els intents i les notes d'activitats ordinàries queden fora d'eixa actuació.
++
++## Publicació i reversió pendents
++
++Preparar un paquet sanejat des de la base pública i conservar les versions efectives de Rules, Apps Script i Pages. Amb autorització de publicació, aplicar Rules → Apps Script → Pages. Validar la lectura del valor inicial i la compatibilitat de les escriptures existents amb un entorn sintètic. L'aprovació d'una projecció acadèmica té un abast separat de la publicació del formulari.
++
++Per revertir una edició, tornar a guardar els valors de la revisió anterior amb la revisió actual. L'historial conserva ambdós canvis. Per revertir el desplegament, restaurar Pages, després Apps Script. Si ja hi ha una escala registrada, conservar les Rules que protegixen l'historial fins que es puga verificar la protecció equivalent de qualsevol versió anterior. No cal restaurar el llibre o la base de dades.
++
++## Validació local
++
++- 100/100 proves dirigides i 13/13 comprovacions de l'emulador RTDB.
++- Navegador amb el component real, emulador i backend local: escala inicial, aplicació anterior, mitjana 5,5, edició decimal, validació, cancel·lació, persistència, reload, ambdós modes, autosave i fallada amb el valor anterior preservat.
++- Regressions: rúbrica interna original, correcció oberta amb resposta simulada del model, corrector determinista i registres històrics intactes. El catàleg ordinari i les fórmules curriculars són idèntics a la base de la branca. Cap crida real a OpenAI.
++- TypeScript, ESLint i builds normal i GitHub Pages PASS. ESLint conserva tres avisos previs de proves de cua i els builds conserven l'avís de mida dels paquets.
+diff --git a/lib/rubric-service.ts b/lib/rubric-service.ts
+index 5d79f387267f63ca75d9b5cb2378355c7f750fc4..8b1b08734702e55e5279a45886b97e2b2a4755eb 100644
+--- a/lib/rubric-service.ts
++++ b/lib/rubric-service.ts
+@@ -1,10 +1,13 @@
+ "use client";
+ /* eslint-disable @typescript-eslint/no-explicit-any */
+-import { firebasePath, initFirebase, isDemo, safeKey } from "./services";
+-import { createRubricAssessment, rubricEvidence, type RubricAssessment, type RubricLevel, type RubricRating, type RubricTemplate } from "./rubrics";
++import { apiCall, firebasePath, initFirebase, isDemo, safeKey } from "./services";
++import { APPROVED_TEACHER_RUBRIC_SCORES, createRubricAssessment, effectiveTeacherRubricScale, rubricEvidence,
++  validTeacherRubricScores, type RubricAssessment, type RubricLevel, type RubricLevelScale, type RubricLevelScores,
++  type RubricRating, type RubricTemplate } from "./rubrics";
+ 
+ export type RubricData = { catalog: Record<string, { currentVersion: number; versions: Record<string, RubricTemplate> }>;
+-  assessments: Record<string, RubricAssessment>; ratings: Record<string, Record<string, Record<string, RubricRating>>> };
++  assessments: Record<string, RubricAssessment>; ratings: Record<string, Record<string, Record<string, RubricRating>>>;
++  levelScale?: RubricLevelScale };
+ const empty = (): RubricData => ({ catalog: {}, assessments: {}, ratings: {} });
+ let demo = empty();
+ const demoKey = "pdc-rubrics-demo-v1";
+@@ -32,6 +35,24 @@ export function subscribeRubrics(callback: (data: RubricData) => void) {
+   ref.on("value", listener);
+   return () => ref.off("value", listener);
+ }
++export async function saveTeacherRubricScale(scores: RubricLevelScores, expectedRevision: number): Promise<RubricLevelScale> {
++  if (!validTeacherRubricScores(scores)) throw new Error("Introduïx quatre valors estrictament descendents entre 0 i 10.");
++  if (isDemo()) {
++    const current = readDemo();
++    if (effectiveTeacherRubricScale(current.levelScale).revision !== expectedRevision) throw new Error("L’escala ha canviat. Recarrega-la.");
++    const levelScale = { revision: expectedRevision + 1, scores };
++    const next = { ...current, levelScale };
++    localStorage.setItem(demoKey, JSON.stringify(next));
++    demo = next;
++    return levelScale;
++  }
++  const { scale } = await apiCall("teacher_save_rubric_level_scale", { scores, expectedRevision });
++  if (!scale || effectiveTeacherRubricScale(scale).revision === 0 ||
++      Object.keys(scores).some(level => scale.scores[level] !== scores[level as keyof RubricLevelScores])) {
++    throw new Error("No s’ha pogut confirmar l’escala guardada.");
++  }
++  return { revision: scale.revision, scores: scale.scores };
++}
+ export function listRubrics(data: RubricData) {
+   return Object.values(data.catalog || {}).map((entry) => entry.versions?.[entry.currentVersion])
+     .filter((entry): entry is RubricTemplate => Boolean(entry && entry.status === "ACTIVE"))
+@@ -158,5 +179,5 @@ async function flush(id: string, task: Pending) {
+ export function rubricOperationalEvidence(data: RubricData) {
+   return Object.values(data.assessments || {}).flatMap((assessment) =>
+     Object.entries(data.ratings?.[key(assessment.assessmentId)] || {}).flatMap(([studentId, ratings]) =>
+-      rubricEvidence(assessment, studentId, ratings)));
++      rubricEvidence(assessment, studentId, ratings, APPROVED_TEACHER_RUBRIC_SCORES)));
+ }
+diff --git a/lib/rubrics.ts b/lib/rubrics.ts
+index f7567281c71f49a56858310fae46de7ca5e925cc..56f1b015d1cab1811de0d62bdcad3b9acdaea122 100644
+--- a/lib/rubrics.ts
++++ b/lib/rubrics.ts
+@@ -6,9 +6,39 @@ import type { Evidence } from "./assessment-engine";
+ export const RUBRIC_LEVELS = ["MOLT_CONSOLIDAT", "CONSOLIDAT", "EN_PROCES", "INICIAL", "SENSE_INFORMACIO"] as const;
+ export type RubricLevel = typeof RUBRIC_LEVELS[number];
+ export type RatingLevel = RubricLevel | "UNRATED";
+-export const RUBRIC_SCORES: Record<RubricLevel, number | null> = Object.freeze({
+-  MOLT_CONSOLIDAT: 10, CONSOLIDAT: 7.5, EN_PROCES: 5, INICIAL: 2.5, SENSE_INFORMACIO: null,
++export const SCORED_RUBRIC_LEVELS = ["MOLT_CONSOLIDAT", "CONSOLIDAT", "EN_PROCES", "INICIAL"] as const;
++export type ScoredRubricLevel = typeof SCORED_RUBRIC_LEVELS[number];
++export type RubricLevelScores = Readonly<Record<ScoredRubricLevel, number>>;
++export type RubricLevelScale = { revision: number; scores: RubricLevelScores };
++
++export const DEFAULT_TEACHER_RUBRIC_SCORES: RubricLevelScores = Object.freeze({
++  MOLT_CONSOLIDAT: 10, CONSOLIDAT: 7, EN_PROCES: 4, INICIAL: 1,
++});
++// Existing curricular projections remain on their approved scale until a separate academic decision.
++export const APPROVED_TEACHER_RUBRIC_SCORES: RubricLevelScores = Object.freeze({
++  MOLT_CONSOLIDAT: 10, CONSOLIDAT: 7.5, EN_PROCES: 5, INICIAL: 2.5,
+ });
++
++export function validTeacherRubricScores(value: unknown): value is RubricLevelScores {
++  if (!value || typeof value !== "object" || Object.keys(value).length !== SCORED_RUBRIC_LEVELS.length) return false;
++  const scores = value as RubricLevelScores;
++  return SCORED_RUBRIC_LEVELS.every((level, i) => {
++    const score = scores[level];
++    return Number.isFinite(score) && score >= 0 && score <= 10
++      && (i === 0 || scores[SCORED_RUBRIC_LEVELS[i - 1]] > score);
++  });
++}
++
++export function effectiveTeacherRubricScale(scale?: RubricLevelScale): RubricLevelScale {
++  if (scale && Number.isSafeInteger(scale.revision) && scale.revision > 0 && validTeacherRubricScores(scale.scores)) {
++    return { revision: scale.revision, scores: scale.scores };
++  }
++  return { revision: 0, scores: DEFAULT_TEACHER_RUBRIC_SCORES };
++}
++
++export function teacherRubricLevelScore(level: unknown, scores: RubricLevelScores): number | null {
++  return SCORED_RUBRIC_LEVELS.includes(level as ScoredRubricLevel) ? scores[level as ScoredRubricLevel] : null;
++}
+ export const RUBRIC_LABELS: Record<RatingLevel, string> = {
+   UNRATED: "Sense valorar", MOLT_CONSOLIDAT: "Molt consolidat", CONSOLIDAT: "Consolidat",
+   EN_PROCES: "En procés", INICIAL: "Inicial", SENSE_INFORMACIO: "Sense informació suficient",
+@@ -84,17 +114,17 @@ export function nextRubricLevel(current: RatingLevel): RubricLevel {
+   const index = RUBRIC_LEVELS.indexOf(current as RubricLevel);
+   return RUBRIC_LEVELS[(index + 1) % RUBRIC_LEVELS.length];
+ }
+-export function rubricScore(indicators: RubricIndicator[], ratings: Record<string, RubricRating | undefined>): number | null {
+-  const scores = indicators.map((item) => ratings[item.indicatorId]?.levelId).map((level) => level ? RUBRIC_SCORES[level] : null)
+-    .filter((value): value is number => value !== null && value !== undefined);
++export function rubricScore(indicators: RubricIndicator[], ratings: Record<string, Pick<RubricRating, "levelId"> | undefined>,
++  scale: RubricLevelScores = DEFAULT_TEACHER_RUBRIC_SCORES): number | null {
++  const scores = indicators.map((item) => teacherRubricLevelScore(ratings[item.indicatorId]?.levelId, scale))
++    .filter((value): value is number => value !== null);
+   return scores.length ? scores.reduce((sum, score) => sum + score, 0) / scores.length : null;
+ }
+ export function rubricEvidence(assessment: RubricAssessment, studentId: string,
+-  ratings: Record<string, RubricRating | undefined>): Evidence[] {
++  ratings: Record<string, RubricRating | undefined>, scale: RubricLevelScores = DEFAULT_TEACHER_RUBRIC_SCORES): Evidence[] {
+   return assessment.snapshot.indicators.flatMap((indicator) => {
+-    const level = ratings[indicator.indicatorId]?.levelId;
+-    const score = level ? RUBRIC_SCORES[level] : null;
+-    if (score === null || score === undefined) return [];
++    const score = teacherRubricLevelScore(ratings[indicator.indicatorId]?.levelId, scale);
++    if (score === null) return [];
+     return indicator.criteria.map((criterion) => ({
+       id: `rubric:${assessment.assessmentId}:${studentId}:${indicator.indicatorId}:${criterion}`,
+       source: "RUBRIC" as const, studentId, evidenceType: assessment.evidenceType,
+diff --git a/lib/teacher-rubric-scale-preview.ts b/lib/teacher-rubric-scale-preview.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1447c2b81c12f3b17b0c3fc4265a483e718571e0
+--- /dev/null
++++ b/lib/teacher-rubric-scale-preview.ts
+@@ -0,0 +1,80 @@
++import { assessmentScope, calculateStudentAssessment } from "./assessment";
++import type { Evidence } from "./assessment-engine";
++import type { RubricData } from "./rubric-service";
++import {
++  APPROVED_TEACHER_RUBRIC_SCORES, RUBRIC_LEVELS, rubricEvidence, rubricScore,
++  teacherRubricLevelScore, validTeacherRubricScores, type RubricLevel, type RubricLevelScores, type RubricRating,
++} from "./rubrics";
++import type { AssessmentPlan, UnitAccess } from "./services";
++
++type ClosureState = { plan: Partial<AssessmentPlan>; unitAccess: UnitAccess[] };
++type AssessmentInput = Parameters<typeof calculateStudentAssessment>[0];
++
++function legacyNumericScore(rating: unknown) {
++  if (!rating || typeof rating !== "object" || !("score" in rating)) return null;
++  return typeof rating.score === "number" && Number.isFinite(rating.score) ? rating.score : null;
++}
++
++/** Read-only plan. The baseline is the scale currently used by the curricular projection. */
++export function previewTeacherRubricScale(data: RubricData, scores: RubricLevelScores, closure: ClosureState) {
++  if (!validTeacherRubricScores(scores)) throw new Error("Escala de rúbriques docents no vàlida.");
++  const { plan } = assessmentScope("all", closure.plan);
++  const closedTerms = new Set(plan.terms.filter(term => term.closed).map(term => term.term));
++  const closedUnits = new Set(closure.unitAccess.filter(unit => unit.closed || unit.termClosed).map(unit => unit.unitId));
++  plan.units.forEach(unit => { if (closedTerms.has(unit.term)) closedUnits.add(unit.unitId); });
++
++  const before: Evidence[] = [], after: Evidence[] = [];
++  const orphanApplications = Object.keys(data.ratings).filter(id => !data.assessments[id]).sort();
++  const rows = Object.entries(data.assessments).sort(([a], [b]) => a.localeCompare(b)).flatMap(([assessmentKey, assessment]) => {
++    const scopedUnit = plan.units.find(unit => unit.unitId === assessment.topic);
++    const isProtected = assessment.status !== "ACTIVE" || (assessment.topic === "GLOBAL"
++      ? closedTerms.size > 0 || closedUnits.size > 0
++      : !scopedUnit || closedUnits.has(assessment.topic));
++    const indicators = new Set(assessment.snapshot.indicators.map(indicator => indicator.indicatorId));
++    return Object.entries(data.ratings[assessmentKey] || {}).sort(([a], [b]) => a.localeCompare(b)).map(([studentId, ratings]) => {
++      const recognized: Record<string, RubricRating> = {};
++      const details = Object.entries(ratings).map(([indicatorId, rating]) => {
++        const levelId = rating?.levelId;
++        const recognizedLevel = indicators.has(indicatorId) && RUBRIC_LEVELS.includes(levelId as RubricLevel)
++          && rating.assessmentId === assessment.assessmentId && rating.studentId === studentId && rating.indicatorId === indicatorId;
++        if (recognizedLevel) recognized[indicatorId] = rating;
++        const originalScore = recognizedLevel ? teacherRubricLevelScore(levelId, APPROVED_TEACHER_RUBRIC_SCORES)
++          : legacyNumericScore(rating);
++        const proposedScore = recognizedLevel ? teacherRubricLevelScore(levelId, scores) : null;
++        return { indicatorId, levelId: levelId ?? null, originalScore, proposedScore,
++          difference: originalScore !== null && proposedScore !== null ? proposedScore - originalScore : null,
++          state: !recognizedLevel ? "AMBIGUOUS" : levelId === "SENSE_INFORMACIO" ? "NO_INFORMATION" : "IDENTIFIED" };
++      });
++      const original = rubricEvidence(assessment, studentId, recognized, APPROVED_TEACHER_RUBRIC_SCORES);
++      before.push(...original);
++      after.push(...(isProtected ? original : rubricEvidence(assessment, studentId, recognized, scores)));
++      return { assessmentId: assessment.assessmentId, studentId, protected: isProtected,
++        beforeAverage: rubricScore(assessment.snapshot.indicators, recognized, APPROVED_TEACHER_RUBRIC_SCORES),
++        afterAverage: rubricScore(assessment.snapshot.indicators, recognized, scores), ratings: details };
++    });
++  });
++  return { rubrics: Object.keys(data.catalog).length, applications: Object.keys(data.assessments).length,
++    legacyApplications: Object.keys(data.assessments).length,
++    identifiableRatings: rows.flatMap(row => row.ratings).filter(rating => rating.state !== "AMBIGUOUS").length,
++    ambiguousRatings: rows.flatMap(row => row.ratings).filter(rating => rating.state === "AMBIGUOUS").length,
++    orphanApplications, rows, before, after };
++}
++
++/** Recompute only recognised evidence already present in each supplied curricular view. */
++export function previewTeacherRubricCurricularImpact(plan: ReturnType<typeof previewTeacherRubricScale>, inputs: AssessmentInput[]) {
++  const baseline = new Map(plan.before.map(evidence => [evidence.id, evidence]));
++  const proposed = new Map(plan.after.map(evidence => [evidence.id, evidence]));
++  return inputs.map(input => {
++    const before = calculateStudentAssessment(input);
++    const closedUnit = input.unitAccess?.some(unit => unit.unitId === input.scopeId && (unit.closed || unit.termClosed));
++    if (before.closed || closedUnit) return { studentId: input.studentId, scopeId: input.scopeId, protected: true, before, after: before };
++    const history = (input.evidenceHistory || []).map(evidence => {
++      const original = baseline.get(evidence.id);
++      return evidence.source === "RUBRIC" && original && evidence.score === original.score &&
++        evidence.studentId === original.studentId && evidence.assessmentId === original.assessmentId &&
++        evidence.indicatorId === original.indicatorId ? { ...evidence, score: proposed.get(evidence.id)!.score } : evidence;
++    });
++    return { studentId: input.studentId, scopeId: input.scopeId, protected: false, before,
++      after: calculateStudentAssessment({ ...input, evidenceHistory: history }) };
++  });
++}
+diff --git a/public/firebase-rules.json b/public/firebase-rules.json
+index aba917950be52804319f6184b35e69eb17e40105..55267d98377092ebd354625f3bd48d71bc8ea953 100644
+--- a/public/firebase-rules.json
++++ b/public/firebase-rules.json
+@@ -314,8 +314,13 @@
+       "rubrics": {
+         "$group": {
+           ".read": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+-          ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
++          "levelScale": { ".write": false },
++          "catalog": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
++          "assessments": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
++          "pending": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
++          "deletedAssessments": { ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'" },
+           "ratings": {
++            ".write": "auth != null && auth.token.groupId === $group && auth.token.role === 'teacher'",
+             "$assessmentId": {
+               ".validate": "!root.child('GamificacioPDC').child('rubrics').child($group).child('deletedAssessments').child($assessmentId).exists()"
+             }
+diff --git a/tests/predeploy-emulator.test.mjs b/tests/predeploy-emulator.test.mjs
+index 61debb3e487c155c508e20649d1cf684bf919951..8ffd4c08cc91879d275b2736a1d3f6635dc05a08 100644
+--- a/tests/predeploy-emulator.test.mjs
++++ b/tests/predeploy-emulator.test.mjs
+@@ -46,3 +46,22 @@ test('candidate Rules — real isolated RTDB emulator',{skip:process.env.PDC_PRE
+  });
+  await t.test('foreign teacher cannot change TEST settings or metadata',async()=>{await assert.rejects(request('PUT','GamificacioPDC/teacherState/TEST/settings',{secondAttemptEnabled:false},token('teacher','OTHER')));});
+ });
++
++test('teacher rubric scale is backend-only and existing rubric writes remain available', {skip:process.env.PDC_PREDEPLOY_EMULATOR!=='1'}, async()=>{
++ const teacher=token('teacher'), foreign=token('teacher','OTHER'), student=token();
++ const base='GamificacioPDC/rubrics/TEST';
++ const settings={revision:1,scores:{MOLT_CONSOLIDAT:10,CONSOLIDAT:7,EN_PROCES:4,INICIAL:1}};
++ await request('PUT',base+'/levelScale',settings);
++ assert.deepEqual((await request('GET',base+'/levelScale',undefined,teacher)).data,settings);
++ for(const auth of [teacher,foreign,student,'not-a-token']) {
++  await assert.rejects(request('PUT',base+'/levelScale',{...settings,revision:2},auth));
++  await assert.rejects(request('DELETE',base+'/levelScale',undefined,auth));
++ }
++ for(const auth of [foreign,student,'not-a-token']) await assert.rejects(request('GET',base+'/levelScale',undefined,auth));
++ await assert.rejects(request('PATCH',base,{levelScale:null,'catalog/fixture':{currentVersion:1}},teacher));
++ await request('PATCH',base,{'catalog/fixture':{currentVersion:1},'assessments/application':{assessmentId:'application'},'pending/fixture':{kind:'CATALOG'}},teacher);
++ await request('PUT',base+'/ratings/application/PUPIL/indicator',{levelId:'CONSOLIDAT'},teacher);
++ await request('PATCH',base,{'deletedAssessments/application':{deletedAt:1},'assessments/application':null,'ratings/application':null},teacher);
++ await assert.rejects(request('PUT',base+'/ratings/application/PUPIL/indicator',{levelId:'INICIAL'},teacher));
++ assert.deepEqual((await request('GET',base+'/levelScale',undefined,teacher)).data,settings);
++});
+diff --git a/tests/rubric-backend.test.mjs b/tests/rubric-backend.test.mjs
+index d34d525e328d6351fccf0ebb0f6473763cca00b3..41c0c18165d7e0082413ec821157cd30ad348ae7 100644
+--- a/tests/rubric-backend.test.mjs
++++ b/tests/rubric-backend.test.mjs
+@@ -68,8 +68,11 @@ test("Sheets és la biblioteca mestra i el reinici del curs no elimina el catàl
+ test("Rules només permeten al docent escriure rúbriques", () => {
+   const rules = JSON.parse(fs.readFileSync("public/firebase-rules.json", "utf8"));
+   const grant = rules.rules.GamificacioPDC.rubrics.$group;
+-  assert.match(grant[".write"], /role === 'teacher'/);
+-  assert.doesNotMatch(grant[".write"], /role === 'student'/);
++  for (const key of ["catalog", "assessments", "ratings", "pending", "deletedAssessments"]) {
++    assert.match(grant[key][".write"], /role === 'teacher'/);
++    assert.doesNotMatch(grant[key][".write"], /role === 'student'/);
++  }
++  assert.equal(grant.levelScale[".write"], false);
+ });
+ test("worker elimina per assessmentId, recalcula evidència i conserva rúbrica i altra aplicació", () => {
+   const other = { ...assessment, assessmentId: "other" };
+diff --git a/tests/rubrics.test.mjs b/tests/rubrics.test.mjs
+index ed6f83eb3ed31f6994cb035736312584cfc85252..d3e3ec175e6764531bed7aed8ab860336aec1717 100644
+--- a/tests/rubrics.test.mjs
++++ b/tests/rubrics.test.mjs
+@@ -28,16 +28,16 @@ test("importació agrupa files pel nom exacte, valida descriptors i duplicats",
+ test("mitjana per indicador, Sense informació i UNRATED no són zero", () => {
+   const indicators = ["A", "B", "C", "D"].map((name, i) => ({ ...template.indicators[0], indicatorId: name, name, criteria: i ? [criteria[i]] : criteria }));
+   const ratings = Object.fromEntries([["A", "MOLT_CONSOLIDAT"], ["B", "CONSOLIDAT"], ["C", "SENSE_INFORMACIO"], ["D", "EN_PROCES"]].map(([id, level]) => [id, rating(id, level)]));
+-  assert.equal(rubric.rubricScore(indicators, ratings), 7.5);
++  assert.equal(rubric.rubricScore(indicators, ratings), 7);
+   assert.equal(rubric.rubricScore(indicators, { A: rating("A", "SENSE_INFORMACIO") }), null);
+   assert.equal(rubric.rubricScore(indicators, {}), null);
+-  assert.equal(rubric.rubricScore(template.indicators, { [template.indicators[0].indicatorId]: rating(template.indicators[0].indicatorId, "CONSOLIDAT") }), 7.5);
++  assert.equal(rubric.rubricScore(template.indicators, { [template.indicators[0].indicatorId]: rating(template.indicators[0].indicatorId, "CONSOLIDAT") }), 7);
+ });
+ test("una evidència per subcriteri, traçable i sense evidència global duplicada", () => {
+   const result = rubric.rubricEvidence(assessment, "TEST", { [template.indicators[0].indicatorId]: rating(template.indicators[0].indicatorId, "CONSOLIDAT") });
+   assert.equal(result.length, 4);
+   assert.deepEqual(result.map(item => item.criteria[0].id), criteria);
+-  assert.ok(result.every(item => item.assessmentId === assessment.assessmentId && item.rubricId === template.rubricId && item.indicatorId === template.indicators[0].indicatorId && item.score === 7.5));
++  assert.ok(result.every(item => item.assessmentId === assessment.assessmentId && item.rubricId === template.rubricId && item.indicatorId === template.indicators[0].indicatorId && item.score === 7));
+   assert.equal(new Set(result.map(item => item.id)).size, 4);
+   const consolidated = consolidateEvidence(result, undefined, Date.parse(assessment.date));
+   assert.equal(consolidated.criteria.length, 4);
+@@ -109,7 +109,7 @@ test("smoke local: quatre indicadors, un amb quatre criteris, dos modes i recupe
+   const reloaded = await service.readRubricData();
+   assert.equal(service.listRubrics(reloaded)[0].indicators.length, 4);
+   const ratings = reloaded.ratings[use.assessmentId].TEST;
+-  assert.equal(rubric.rubricScore(smoke.indicators, ratings), 7.5);
++  assert.equal(rubric.rubricScore(smoke.indicators, ratings), 7);
+   assert.equal(service.rubricOperationalEvidence(reloaded).filter((item) => item.studentId === "TEST").length, 6);
+   assert.equal(reloaded.ratings[use.assessmentId].SECOND[a].levelId, "CONSOLIDAT");
+ });
+diff --git a/tests/support/firebase-memory.mjs b/tests/support/firebase-memory.mjs
+index 9de7d088b58489255989662210196d126628ac95..ca8efd3a2a1f9ba844b11fafeef207b7f53be0d8 100644
+--- a/tests/support/firebase-memory.mjs
++++ b/tests/support/firebase-memory.mjs
+@@ -15,11 +15,11 @@ export function memoryDatabase() {
+  });
+  return {ref,read,failNextUpdate:()=>{failUpdate=true;},failNextTransaction:()=>{failTransaction=true;},listenerCount:()=>[...listeners.values()].reduce((n,s)=>n+s.size,0)};
+ }
+-export async function loadWithFirebase(entry, db) {
+- globalThis.__pdcTestDb=db;
++export async function loadWithFirebase(entry, db, apiCall) {
++ globalThis.__pdcTestDb=db; globalThis.__pdcTestApiCall=apiCall;
+  const bundle=await build({entryPoints:[entry],bundle:true,write:false,platform:"node",format:"esm",plugins:[{name:"fake-firebase",setup(build){
+   build.onResolve({filter:/^\.\/services$/},()=>({path:"services",namespace:"fake"}));
+-  build.onLoad({filter:/.*/,namespace:"fake"},()=>({contents:`export const initFirebase=()=>globalThis.__pdcTestDb; export const readStudentSession=()=>globalThis.__pdcTestSession || null; export const isDemo=()=>false; export const safeKey=x=>String(x).replace(/[.#$\\[\\]/]/g,"_"); export const firebasePath=(section,...parts)=>["GamificacioPDC",section,"TEST",...parts].join("/");`}));
++  build.onLoad({filter:/.*/,namespace:"fake"},()=>({contents:`export const apiCall=(...args)=>globalThis.__pdcTestApiCall(...args); export const initFirebase=()=>globalThis.__pdcTestDb; export const readStudentSession=()=>globalThis.__pdcTestSession || null; export const isDemo=()=>false; export const safeKey=x=>String(x).replace(/[.#$\\[\\]/]/g,"_"); export const firebasePath=(section,...parts)=>["GamificacioPDC",section,"TEST",...parts].join("/");`}));
+  }}]});
+  return import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`);
+ }
+diff --git a/tests/support/predeploy/entry.tsx b/tests/support/predeploy/entry.tsx
+index 9da8c7bff98bdd20892803c9170980ff50db44db..efec9abb4f1a9fc2cd5d1d83f8dd4768de0eefd3 100644
+--- a/tests/support/predeploy/entry.tsx
++++ b/tests/support/predeploy/entry.tsx
+@@ -5,6 +5,7 @@ import {createRoot} from 'react-dom/client';
+ // @ts-expect-error local validation-only virtual export
+ import {PredeployActivityViewer} from '../../../app/PdcApp';
+ import {PendingQualificationPanel} from '../../../app/components/PendingQualificationPanel';
++import {TeacherRubrics} from '../../../app/TeacherRubrics';
+ import {curriculum} from '../../../lib/curriculum';
+ import {progressFromEvents} from '../../../lib/academic-progress';
+ import '../../../app/globals.css';
+@@ -15,20 +16,24 @@ function Harness(){
+  const unit=curriculum.find(u=>u.id===activityId.slice(0,3))||curriculum.find(u=>u.id==='u04')!;
+  const [rows,setRows]=useState<any[]>([]),[teacherRows,setTeacherRows]=useState<any[]>([]),[refresh,setRefresh]=useState(0),[metrics,setMetrics]=useState<any>({});
+  const settings={requireCorrectionAfterFailure:false,secondAttemptWithHint:true,secondAttemptEnabled:true,allowContinueAfterFirst:true,scorePolicy:'SECOND_ATTEMPT' as const};
+- const chooseRole=(next:string)=>{window.__predeployRole=next;setRole(next);};
++ const chooseRole=(next:string)=>{window.__predeployRole=next==='rubrics'?'teacher':next;setRole(next);};
+  useEffect(()=>{let active=true;const ref=window.__predeploy.db.ref('GamificacioPDC/academic/TEST/events/SYNTHETIC');const listener=(s:any)=>{if(active)setRows(progressFromEvents(s.val()));};ref.on('value',listener);return()=>{active=false;ref.off('value',listener);};},[role]);
+  useEffect(()=>{if(role!=='teacher')return;let active=true;void window.__predeploy.send('db',{method:'GET',path:'GamificacioPDC/teacherState/TEST/studentUpdates/SYNTHETIC',role:'teacher'}).then((r:any)=>{if(active)setTeacherRows(Object.values(r.data||{}));});return()=>{active=false;};},[role,refresh]);
+  useEffect(()=>{let active=true;const load=()=>void window.__predeploy.send('metrics').then((v:any)=>{if(active)setMetrics(v);});load();const timer=setInterval(load,1000);return()=>{active=false;clearInterval(timer);};},[]);
+  const activity=unit.activities.find(a=>a.id===activityId)||unit.activities[0];
+  const select=(id:string)=>{localStorage.setItem('validation-activity',id);setActivity(id);};
+  return <main><header style={{padding:16,background:'#173f43',color:'white'}}><strong>PDC3 — VALIDACIÓ LOCAL · demo-pdc3 · dades sintètiques</strong>
+-  <nav><button onClick={()=>chooseRole('student')}>Alumne sintètic</button><button onClick={()=>chooseRole('teacher')}>Docent sintètic</button></nav>
++  <nav><button onClick={()=>chooseRole('student')}>Alumne sintètic</button><button onClick={()=>chooseRole('teacher')}>Docent sintètic</button><button onClick={()=>chooseRole('rubrics')}>Rúbriques sintètiques</button></nav>
+   <p>OpenAI HTTP: {metrics.openAIHTTPCalls||0} · Grader simulat: {metrics.simulatedGraderCalls||0} · Files Sheets simulades: {metrics.projectionRows?.length||0}</p>
+  </header>
++ {role==='rubrics'&&<aside>
++  <button onClick={()=>void window.__predeploy.send('fault',{mode:'FAIL_RUBRIC_SCALE'})}>Simular fallada de guardat</button>
++  <button onClick={()=>void window.__predeploy.send('fault',{mode:''})}>Restaurar el guardat</button>
++ </aside>}
+  {role==='student'?<><label style={{display:'block',padding:16}}>Activitat sintètica <select value={activity.id} onChange={e=>select(e.target.value)}>{curriculum.filter(u=>['u03','u04'].includes(u.id)).flatMap(u=>u.activities).map(a=><option key={a.id} value={a.id}>{a.id} · {a.kind}</option>)}</select></label>
+   <PredeployActivityViewer key={activity.id} activity={activity} originalActivity={activity} unit={unit} policy={{activityId:activity.id,unitId:unit.id,maxGradedAttempts:2,retryCounts:true,required:true,variantOnRetry:true,solutionMode:'EN_BLOQUEJAR_O_TANCAR'}} pedagogicalSettings={settings} progress={rows.find(r=>r.activityId===activity.id)} onBack={()=>{}} onNext={()=>select(unit.activities[(unit.activities.findIndex(a=>a.id===activity.id)+1)%unit.activities.length].id)} onProgressSaved={(p:any)=>setRows(old=>[...old.filter(r=>r.activityId!==p.activityId),p])} activityNumber={unit.activities.indexOf(activity)+1} activityTotal={unit.activities.length}/>
+   <aside style={{padding:16}}><button onClick={()=>void window.__predeploy.send('fault',{mode:'DROP_ACK'})}>Simular ACK perdut</button><button onClick={()=>void window.__predeploy.send('fault',{mode:'FAIL_BEFORE_GRADE'})}>Simular fallada abans de qualificar</button><button onClick={()=>void window.__predeploy.send('fault',{mode:''})}>Restaurar xarxa sintètica</button></aside>
+- </>:<div style={{padding:24}}><h1>Seguiment docent — prova local</h1><p>Les revisions pedagògiques revisen qualificacions existents; les primeres qualificacions pendents es gestionen separadament.</p>
++ </>:role==='rubrics'?<TeacherRubrics students={[{id:'SYNTHETIC',name:'Alumne sintètic'}]}/>:<div style={{padding:24}}><h1>Seguiment docent — prova local</h1><p>Les revisions pedagògiques revisen qualificacions existents; les primeres qualificacions pendents es gestionen separadament.</p>
+   <button onClick={()=>setRefresh(n=>n+1)}>Actualitzar projecció docent</button>
+   <section><h2>Notes projectades del perfil sintètic</h2>{teacherRows.map(r=><p key={r.activityId}>{r.activityId} · {r.score}/10 · {r.feedback}</p>)}</section>
+   <PendingQualificationPanel refreshKey={refresh} students={[{id:'SYNTHETIC',name:'Alumne sintètic'}]} onOpenActivity={id=>alert('Activitat actual: '+id)}/>
+diff --git a/tests/support/predeploy/rig.mjs b/tests/support/predeploy/rig.mjs
+index 9db3d357a779690de9edcbf25b0bf434f7099774..aa25c07cc43be694e8168e8f61c435729924141d 100644
+--- a/tests/support/predeploy/rig.mjs
++++ b/tests/support/predeploy/rig.mjs
+@@ -27,6 +27,20 @@ export async function createRig() {
+  const grade={score:0,status:'incorrect',feedback:'Zero canònic sintètic ja guardat.',teacherReview:false};
+  f.set(f.root+'/backendGrades/SYNTHETIC/'+existing.submissionId,{grade,telemetry:{studentId:'SYNTHETIC',activityId:existing.activityId,submissionId:existing.submissionId}});
+  f.set(f.root+'/events/SYNTHETIC/'+existing.submissionId+'-grade',{...existing,eventId:existing.submissionId+'-grade',createdAt:3000,status:'SYNC_PENDING',payload:{answer:existing.payload.answer,grade,progress:{activityId:existing.activityId,unitId:existing.unitId,lastSubmissionId:existing.submissionId,score:0,lastScore:0,gradedAttempts:1,attempts:1}}});
++ const rubricLevels=['MOLT_CONSOLIDAT','CONSOLIDAT','EN_PROCES','INICIAL','SENSE_INFORMACIO'];
++ const template={rubricId:'fixture',name:'Rúbrica importada de prova',version:1,topic:'u03',evidenceType:'ORAL_PRESENTATION',status:'ACTIVE',
++  createdAt:'2026-10-01',updatedAt:'2026-10-01',indicators:rubricLevels.slice(0,4).map((level,i)=>({
++   indicatorId:'i'+(i+1),name:'Indicador '+(i+1),criteria:['MAT-1.2'],
++   descriptors:Object.fromEntries(rubricLevels.map(key=>[key,'Descriptor sintètic '+key])),
++  }))};
++ const application={assessmentId:'application',rubricId:'fixture',rubricVersion:1,groupId:'TEST',topic:'u03',date:'2026-10-01',
++  evidenceType:'ORAL_PRESENTATION',status:'ACTIVE',snapshot:template,applicationName:'Aplicació anterior',createdAt:'2026-10-01',updatedAt:'2026-10-01'};
++ f.set('GamificacioPDC/rubrics/TEST',{
++  catalog:{fixture:{currentVersion:1,versions:{1:template}}},assessments:{application},
++  ratings:{application:{SYNTHETIC:Object.fromEntries(rubricLevels.slice(0,4).map((levelId,i)=>['i'+(i+1),{
++   assessmentId:'application',studentId:'SYNTHETIC',indicatorId:'i'+(i+1),levelId,revision:1,updatedAt:'2026-10-02',status:'SYNCED',
++  }]))}},
++ });
+  await request('PUT','.settings/rules',JSON.parse(fs.readFileSync('public/firebase-rules.json','utf8')));
+  await request('PUT','GamificacioPDC',f.read('GamificacioPDC'));
+  f.ctx.UrlFetchApp.fetch=()=>{networkCalls++;throw Error('EXTERNAL_NETWORK_FORBIDDEN');};
+@@ -62,11 +76,15 @@ export async function createRig() {
+   return enqueue(async()=>{
+    await load();patches=[];calls[action]=(calls[action]||0)+1;
+    const q={...data,groupId:'TEST'};
+-   const methods={submit_no_answer:'pdcGradeExplicitBlank_',grade_open:'pdcGradeOpenFirebase_',submission_status:'pdcSubmissionStatus_',teacher_pending_preview:'pdcTeacherPendingPreview_',teacher_recover_pending:'pdcTeacherRecoverPending_',teacher_resolve_pending:'pdcTeacherResolvePending_'};
++   const methods={submit_no_answer:'pdcGradeExplicitBlank_',grade_open:'pdcGradeOpenFirebase_',submission_status:'pdcSubmissionStatus_',teacher_pending_preview:'pdcTeacherPendingPreview_',teacher_recover_pending:'pdcTeacherRecoverPending_',teacher_resolve_pending:'pdcTeacherResolvePending_',teacher_save_rubric_level_scale:'pdcSaveTeacherRubricLevelScale_'};
+    if(!methods[action])throw Error('UNSUPPORTED_LOCAL_ACTION');
+    if(fault==='FAIL_BEFORE_GRADE'&&['grade_open','submit_no_answer'].includes(action)){const e=Error('Fallada de xarxa sintètica abans de qualificar');e.code='BACKEND_NETWORK';throw e;}
+    if(action==='grade_open'||action==='submission_status')f.ctx.pdcRequireOpenGradeSession_(q);
+    f.props.set(f.ctx.pdcTeacherSessionKey_('teacher-test'),JSON.stringify({epoch:f.ctx.pdcResetEpoch_(),expiresAt:Date.now()+3600000}));
++   if(action==='teacher_save_rubric_level_scale'){
++    f.ctx.pdcRequireTeacher_(q.teacherToken);
++    if(fault==='FAIL_RUBRIC_SCALE')throw Error('Fallada de persistència sintètica');
++   }
+    let result;
+    try{result=f.ctx[methods[action]](q);await flush();}
+    catch(error){await flush();throw error;}
+diff --git a/tests/teacher-rubric-scale.test.mjs b/tests/teacher-rubric-scale.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..998ef29d489e42a64f161c367529ba908218ec4c
+--- /dev/null
++++ b/tests/teacher-rubric-scale.test.mjs
+@@ -0,0 +1,160 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { readFileSync } from "node:fs";
++import { build } from "esbuild";
++import { loadWithFirebase, memoryDatabase } from "./support/firebase-memory.mjs";
++import { pendingBackend } from "./support/pending-backend.mjs";
++
++const bundle = await build({ stdin: { contents: `
++  export * from "./lib/rubrics";
++  export { curriculum } from "./lib/curriculum";
++  export { gradeLocally, gradeNumericProcedure } from "./lib/checker";
++  export * from "./lib/teacher-rubric-scale-preview";
++`, resolveDir: process.cwd() }, bundle: true, write: false, platform: "node", format: "esm" });
++const rubric = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`);
++
++const descriptors = { MOLT_CONSOLIDAT: "A", CONSOLIDAT: "B", EN_PROCES: "C", INICIAL: "D", SENSE_INFORMACIO: "E" };
++const template = rubric.createRubric({
++  name: "Importació sintètica", topic: "u03", evidenceType: "ORAL_PRESENTATION",
++  rows: Array.from({ length: 5 }, (_, i) => ({ indicator: "Indicador " + i, criterion: "MAT-1.2", descriptors })),
++}, undefined, "2026-10-01", "rubric-test");
++const old = rubric.createRubricAssessment(template, "TEST", "old", "2026-10-01");
++const frozen = { ...old, assessmentId: "closed", status: "CLOSED" };
++const scores = { MOLT_CONSOLIDAT: 9.5, CONSOLIDAT: 7.25, EN_PROCES: 4, INICIAL: 0 };
++function ratingsFor(assessmentId) {
++  return Object.fromEntries(template.indicators.map(({ indicatorId }, i) => [indicatorId, {
++    assessmentId, studentId: "PUPIL", indicatorId, levelId: Object.keys(descriptors)[i], revision: 1, updatedAt: "2026-10-02",
++  }]));
++}
++
++test("all five historical level IDs retain identity and only four count", () => {
++  assert.equal(rubric.rubricScore(template.indicators, ratingsFor("old")), 5.5);
++  assert.equal(rubric.rubricScore(template.indicators, ratingsFor("closed"), scores), 5.1875);
++  assert.deepEqual(rubric.rubricEvidence(old, "PUPIL", ratingsFor("old")).map(e => e.score), [10, 7, 4, 1]);
++});
++
++test("dry-run is deterministic, preserves IDs, protects closures and does not guess a level from a number", () => {
++  const ratings = ratingsFor("old");
++  ratings[template.indicators[4].indicatorId] = { score: 7.5 };
++  const data = { catalog: { [template.rubricId]: { currentVersion: 1, versions: { 1: template } } },
++    assessments: { old, closed: frozen }, ratings: { old: { PUPIL: ratings }, closed: { PUPIL: ratingsFor("closed") } } };
++  const copy = structuredClone(data);
++  const scope = { plan: { terms: [{ term: 1, closed: false }] }, unitAccess: [] };
++  const preview = rubric.previewTeacherRubricScale(data, scores, scope);
++  assert.deepEqual(preview, rubric.previewTeacherRubricScale(data, scores, scope));
++  assert.deepEqual(data, copy);
++  assert.equal(preview.rubrics, 1);
++  assert.equal(preview.rows.find(row => row.assessmentId === "old").afterAverage, 5.1875);
++  assert.equal(preview.rows.find(row => row.assessmentId === "old").ratings.at(-1).state, "AMBIGUOUS");
++  assert.equal(preview.rows.find(row => row.assessmentId === "closed").protected, true);
++  assert.deepEqual(preview.before.map(e => e.id), preview.after.map(e => e.id));
++  assert.deepEqual(preview.after.filter(e => e.assessmentId === "closed").map(e => e.score), [10, 7.5, 5, 2.5]);
++  assert.deepEqual(preview.after.filter(e => e.assessmentId === "old").map(e => e.score), [9.5, 7.25, 4, 0]);
++  const closedTerm = rubric.previewTeacherRubricScale(data, scores, { ...scope, plan: { terms: [{ term: 1, closed: true }] } });
++  assert.deepEqual(closedTerm.after, closedTerm.before);
++});
++
++test("authenticated teacher save is validated, atomic, versioned and replayable", () => {
++  const f = pendingBackend();
++  f.ctx.console.error = () => {};
++  const call = (payload) => JSON.parse(f.ctx.doPost({ postData: { contents: JSON.stringify({ action: "teacher_save_rubric_level_scale", ...payload }) } }).text);
++  f.ctx.pdcJson_ = result => ({ text: JSON.stringify(result) });
++  const data = { teacherToken: "teacher-test", groupId: "TEST", scores, expectedRevision: 0 };
++  const path = "GamificacioPDC/rubrics/TEST/levelScale";
++  assert.equal(call({ ...data, teacherToken: "" }).ok, false);
++  assert.equal(call({ ...data, groupId: "OTHER" }).ok, false);
++  for (const bad of [{ ...scores, INICIAL: -1 }, { ...scores, INICIAL: 4 }, { ...scores, CONSOLIDAT: "7" }, { ...scores, SENSE_INFORMACIO: 0 }])
++    assert.equal(call({ ...data, scores: bad }).ok, false);
++  assert.equal(f.read(path), null);
++  const first = call(data);
++  assert.equal(first.ok, true);
++  assert.equal(first.scale.revision, 1);
++  assert.deepEqual(first.scale.scores, scores);
++  assert.deepEqual(call(data), first);
++  assert.equal(call({ ...data, scores: { ...scores, INICIAL: 1 } }).ok, false);
++  const second = call({ ...data, expectedRevision: 1, scores: { ...scores, INICIAL: 1 } });
++  assert.equal(second.scale.revision, 2);
++  assert.deepEqual(f.read(path + "/history/v1").scores, scores);
++  assert.equal(f.calls(), 0);
++});
++
++test("source mirror matches", () => {
++  assert.deepEqual(readFileSync("apps-script/Code.gs"), readFileSync("APPSCRIPT/Code.gs"));
++});
++
++test("reload reads the saved configuration and failed requests keep the previous scale and ratings", async () => {
++  const db = memoryDatabase();
++  const path = "GamificacioPDC/rubrics/TEST";
++  const f = pendingBackend();
++  f.ctx.pdcJson_ = result => ({ text: JSON.stringify(result) });
++  let offline = false;
++  const service = await loadWithFirebase("lib/rubric-service.ts", db, async (action, payload) => {
++    if (offline) throw new Error("offline");
++    const result = JSON.parse(f.ctx.doPost({ postData: { contents: JSON.stringify({
++      action, ...payload, teacherToken: "teacher-test", groupId: "TEST",
++    }) } }).text);
++    if (!result.ok) throw new Error(result.error);
++    await db.ref(path + "/levelScale").set(f.read(path + "/levelScale"));
++    return result;
++  });
++  await db.ref(path).set({ assessments: { old }, ratings: { old: { PUPIL: ratingsFor("old") } } });
++  const original = await service.readRubricData();
++  const saved = await service.saveTeacherRubricScale(scores, 0);
++  assert.deepEqual(saved.scores, scores);
++  const reloaded = await service.readRubricData();
++  assert.deepEqual(rubric.effectiveTeacherRubricScale(reloaded.levelScale), saved);
++  assert.deepEqual(reloaded.ratings, original.ratings);
++  assert.deepEqual(reloaded.assessments, original.assessments);
++  assert.deepEqual(service.rubricOperationalEvidence(reloaded), service.rubricOperationalEvidence(original));
++  offline = true;
++  await assert.rejects(service.saveTeacherRubricScale({ ...scores, INICIAL: 1 }, 1), /offline/);
++  assert.deepEqual(rubric.effectiveTeacherRubricScale((await service.readRubricData()).levelScale), saved);
++});
++
++test("curricular simulation changes only matching rubric evidence and leaves closed summaries untouched", () => {
++  const data = { catalog: {}, assessments: { old }, ratings: { old: { PUPIL: ratingsFor("old") } } };
++  const plan = rubric.previewTeacherRubricScale(data, scores, { plan: {}, unitAccess: [] });
++  const activityEvidence = { ...plan.before[0], id: "ordinary-activity", source: "PDC3", activityId: "u03-01", score: 8 };
++  const external = { ...plan.before[0], id: "unrelated-rubric", assessmentId: "unrelated-rubric", score: 8 };
++  const input = { studentId: "PUPIL", scopeId: "u03", progress: [], observations: [], attitudeWeight: 0,
++    evidenceHistory: [activityEvidence, external, ...plan.before] };
++  const original = structuredClone(input);
++  const [open, closed] = rubric.previewTeacherRubricCurricularImpact(plan, [input,
++    { ...input, unitAccess: [{ unitId: "u03", enabled: false, current: false, closed: true }] }]);
++  assert.notDeepEqual(open.before, open.after);
++  assert.deepEqual(closed.before, closed.after);
++  assert.deepEqual(input, original);
++});
++
++test("a teacher rubric scale edit leaves ordinary internal rubric, model result, deterministic grades and historical data unchanged", () => {
++  const f = pendingBackend();
++  const open = f.ctx.PDC_ACTIVITY_CATALOG["u03-05"];
++  const internalRubric = JSON.stringify(open.rubric);
++  const historical = f.answer("historical", "u03-06");
++  const historyPath = f.root + "/events/SYNTHETIC/";
++  const first = f.answer("before", "u03-05");
++  const initialGrade = f.ctx.pdcGradeOpenFirebase_(f.request("before", "u03-05")).grade;
++  const initialGradeEvent = structuredClone(f.read(historyPath + "before-grade"));
++  const numeric = rubric.curriculum.find(unit => unit.id === "u03").activities[0];
++  const choice = rubric.curriculum.find(unit => unit.id === "u03").activities[1];
++  const procedure = "m = 540 g; V = 200 cm³. d = 540/200 = 2,7 g/cm³.";
++  const deterministic = [
++    rubric.gradeNumericProcedure(numeric, "2.7", procedure),
++    rubric.gradeLocally(choice, choice.answer),
++  ];
++  // Use a fresh submission fixture for the same internal activity and answer.
++  const other = pendingBackend();
++  other.ctx.pdcSaveTeacherRubricLevelScale_({ groupId: "TEST", expectedRevision: 0, scores });
++  other.answer("after", "u03-05");
++  const laterGrade = other.ctx.pdcGradeOpenFirebase_(other.request("after", "u03-05")).grade;
++  assert.deepEqual(JSON.parse(JSON.stringify(laterGrade)), JSON.parse(JSON.stringify(initialGrade)));
++  f.ctx.pdcSaveTeacherRubricLevelScale_({ groupId: "TEST", expectedRevision: 0, scores });
++  assert.equal(JSON.stringify(f.ctx.PDC_ACTIVITY_CATALOG["u03-05"].rubric), internalRubric);
++  assert.deepEqual(f.read(historyPath + "before-answer"), structuredClone(first));
++  assert.deepEqual(f.read(historyPath + "historical-answer"), structuredClone(historical));
++  assert.deepEqual(structuredClone(f.read(historyPath + "before-grade")), initialGradeEvent);
++  assert.deepEqual([
++    rubric.gradeNumericProcedure(numeric, "2.7", procedure),
++    rubric.gradeLocally(choice, choice.answer),
++  ], deterministic);
++});

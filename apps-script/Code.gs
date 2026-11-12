@@ -92,6 +92,7 @@ var PDC_TEACHER_ACTIONS = [
   "teacher_save_observation", "teacher_approve_correction", "teacher_add_participation",
   "battle_prepare", "battle_finalize", "battle_history",
   "teacher_class_start", "teacher_class_end", "teacher_session_decision",
+  "teacher_save_rubric_level_scale",
   "teacher_set_pedagogical_settings", "teacher_set_unit_grading_policy", "teacher_sync_rubrics"
 ];
 var PDC_STUDENT_SESSION_ACTIONS = [
@@ -151,6 +152,7 @@ function doPost(e) {
       case "teacher_check": result = { authorized: true }; break;
       case "teacher_dashboard": result = pdcTeacherDashboard_(); break;
       case "teacher_technical_incidents": result = pdcTeacherTechnicalIncidents_(); break;
+      case "teacher_save_rubric_level_scale": result = pdcSaveTeacherRubricLevelScale_(data); break;
       case "teacher_sync_rubrics": result = pdcTeacherSyncRubrics_(); break;
       case "teacher_apply_historical_review": result = pdcApplyHistoricalReview_(data); break;
       case "teacher_set_pedagogical_settings": result = pdcTeacherSetPedagogicalSettings_(data); break;
@@ -5292,6 +5294,37 @@ function pdcProjectRubrics_() {
       });
     });
   });
+}
+
+/** Save the teacher rubric scale independently of curricular grading and Sheets projection. */
+function pdcSaveTeacherRubricLevelScale_(data) {
+  var group = pdcOpenGradeGroup_(data.groupId);
+  var scores = data.scores;
+  var levels = ["MOLT_CONSOLIDAT", "CONSOLIDAT", "EN_PROCES", "INICIAL"];
+  if (!scores || typeof scores !== "object" || Object.keys(scores).length !== levels.length ||
+      !levels.every(function(level, index) {
+        var value = scores[level];
+        return typeof value === "number" && isFinite(value) && value >= 0 && value <= 10 &&
+          (index === 0 || scores[levels[index - 1]] > value);
+      })) throw new Error("Introduïx quatre valors estrictament descendents entre 0 i 10.");
+  if (!Number.isSafeInteger(data.expectedRevision) || data.expectedRevision < 0) throw new Error("Revisió d’escala no vàlida.");
+  var path = pdcFirebaseRootPath_("rubrics", group) + "/levelScale";
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var current = pdcFirebaseAdminGet_(path);
+    var revision = current ? current.revision : 0;
+    if (current && (revision === data.expectedRevision || revision === data.expectedRevision + 1) &&
+        levels.every(function(level) { return current.scores[level] === scores[level]; })) {
+      return { scale: { revision: revision, scores: current.scores } };
+    }
+    if (revision !== data.expectedRevision) throw new Error("L’escala ha canviat. Recarrega-la abans de guardar.");
+    var next = { revision: revision + 1, scores: scores };
+    var history = current ? current.history || {} : {};
+    history["v" + next.revision] = { scores: scores, updatedAt: new Date().toISOString() };
+    pdcFirebaseAdminSet_(path, { revision: next.revision, scores: scores, history: history });
+    return { scale: next };
+  } finally { lock.releaseLock(); }
 }
 
 /** Explicit teacher-only refresh from permanent Sheets. Pending writes must drain first. */
